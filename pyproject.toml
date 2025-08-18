@@ -1,0 +1,51 @@
+[project]
+name = "cast-monorepo"
+version = "0.1.0"
+description = "Cast Sync monorepo"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = [
+    "libs/cast-core",
+    "libs/cast-sync", 
+    "libs/cast-git",
+    "apps/cast-cli"
+]
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.8.0",
+    "pyright>=1.1.390",
+    "pytest>=8.3.0",
+    "poethepoet>=0.31.0"
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]  # Line too long handled by formatter
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+[tool.poe.tasks]
+fmt = "ruff format ."
+lint = "ruff check --fix ."
+check = "pyright"
+test = "pytest -q"
+all = [
+    {ref="fmt"},
+    {ref="lint"}, 
+    {ref="check"},
+    {ref="test"}
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "libs/*/tests", "apps/*/tests"]
+python_files = ["test_*.py", "*_test.py"]

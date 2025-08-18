@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "updated_at": "2025-08-18 22:33",
+  "baselines": {
+    "test-note-123": {
+      "test1": {
+        "digest": "819874ce5588cebe6fb6fd17cf96bbea07a544bef4300fbeeed6094abd0f413e",
+        "ts": "2025-08-18 22:21"
+      },
+      "test2": {
+        "digest": "af8356437ba9b1917881a0d9793677a9d609a8a52e47d79ea541ac1238f75c8e",
+        "ts": "2025-08-18 22:33"
+      }
+    }
+  }
+}
