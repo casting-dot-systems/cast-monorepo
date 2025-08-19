@@ -6,15 +6,17 @@ import uuid
 from pathlib import Path
 
 import typer
-from cast_sync import HorizontalSync
+from cast_sync import HorizontalSync, build_ephemeral_index
 from rich.console import Console
 from rich.prompt import Prompt
+from rich.table import Table
 from ruamel.yaml import YAML
-from typing import Optional
 
 from cast_core import (
     register_cast,
     list_casts,
+    unregister_cast,
+    resolve_cast_by_name,
 )
 
 # Initialize
@@ -77,7 +79,6 @@ def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON
                         "cast_id": e.cast_id,
                         "name": e.name,
                         "root": str(e.root),
-                        "vault": str(e.vault_path),
                     }
                     for e in entries
                 ]
@@ -87,8 +88,14 @@ def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON
             console.rule("[bold cyan]Installed Casts[/bold cyan]")
             if not entries:
                 console.print("[yellow]No casts installed[/yellow]")
-            for e in entries:
-                console.print(f"[bold]{e.name}[/bold]  (id={e.cast_id})\n  root: {e.root}\n  vault: {e.vault_path}\n")
+            else:
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Name")
+                table.add_column("ID")
+                table.add_column("Root")
+                for e in entries:
+                    table.add_row(e.name, e.cast_id, str(e.root))
+                console.print(table)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(2) from e
@@ -132,86 +139,44 @@ def init(
     with open(cast_dir / "syncstate.json", "w") as f:
         json.dump(syncstate, f, indent=2)
 
-    # Add local.yaml to .gitignore
-    gitignore = root / ".gitignore"
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if "/.cast/local.yaml" not in content:
-            with open(gitignore, "a") as f:
-                f.write("\n/.cast/local.yaml\n")
-    else:
-        gitignore.write_text("/.cast/local.yaml\n")
-
     console.print(f"[green][OK] Cast initialized: {name}[/green]")
     console.print(f"  Root: {root}")
     console.print(f"  Vault: {vault_dir}")
 
 
-@app.command()
-def setup():
-    """Set up local configuration for this Cast."""
-    root = get_current_root()
-    cast_dir = root / ".cast"
-    local_path = cast_dir / "local.yaml"
-
-    if local_path.exists():
-        console.print("[yellow]Local configuration already exists[/yellow]")
-        if not typer.confirm("Overwrite?", default=False):
-            raise typer.Exit(0)
-
-    # Create local config
-    config = {
-        "path-to-root": str(root.absolute()),
-        "installed-vaults": [],
-        "installed-codebases": [],
-    }
-
-    with open(local_path, "w") as f:
-        yaml.dump(config, f)
-
-    console.print("[green][OK] Local configuration created[/green]")
-    console.print(f"  Edit {local_path} to add peer vaults")
+# NOTE: 'setup' and 'add_vault' were removed. Peer discovery is registry-only.
 
 
 @app.command()
-def add_vault(
-    name: str = typer.Argument(..., help="Name of the peer vault"),
-    path: str = typer.Argument(..., help="Path to the peer vault folder"),
+def uninstall(
+    identifier: str = typer.Argument(
+        ...,
+        help="Cast identifier: id, name, or path to root",
+    )
 ):
-    """Add a peer vault to local configuration."""
-    root = get_current_root()
-    local_path = root / ".cast" / "local.yaml"
+    """Uninstall (unregister) a Cast from the machine registry."""
+    try:
+        # Try by id
+        removed = unregister_cast(cast_id=identifier)
+        if not removed:
+            # Try by name
+            removed = unregister_cast(name=identifier)
+        if not removed:
+            # Try by root path
+            p = Path(identifier).expanduser()
+            if p.exists():
+                removed = unregister_cast(root=p.resolve())
 
-    if not local_path.exists():
-        console.print("[red]Error: Run 'cast setup' first[/red]")
-        raise typer.Exit(2)
+        if not removed:
+            console.print(f"[red]Uninstall failed:[/red] No installed cast matched '{identifier}'")
+            raise typer.Exit(2)
 
-    # Load existing config
-    with open(local_path) as f:
-        config = yaml.load(f)
-
-    if not config:
-        config = {"installed-vaults": []}
-    if "installed-vaults" not in config:
-        config["installed-vaults"] = []
-
-    # Check if already exists
-    for vault in config["installed-vaults"]:
-        if vault["name"] == name:
-            console.print(f"[yellow]Vault '{name}' already exists[/yellow]")
-            if not Prompt.ask("Update path?", default=False):
-                raise typer.Exit(0)
-            vault["filepath"] = str(Path(path).absolute())
-            break
-    else:
-        # Add new vault
-        config["installed-vaults"].append({"name": name, "filepath": str(Path(path).absolute())})
-
-    # Save
-    with open(local_path, "w") as f:
-        yaml.dump(config, f)
-
-    console.print(f"[green][OK] Added vault: {name} -> {path}[/green]")
+        console.print(
+            f"[green][OK][/green] Uninstalled cast: [bold]{removed.name}[/bold] (id={removed.cast_id})\n  root: {removed.root}"
+        )
+    except Exception as e:
+        console.print(f"[red]Uninstall failed:[/red] {e}")
+        raise typer.Exit(2) from e
 
 
 @app.command()
@@ -223,6 +188,9 @@ def hsync(
     ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive", help="Don't prompt for conflicts"
+    ),
+    cascade: bool = typer.Option(
+        True, "--cascade/--no-cascade", help="Also run hsync for peers (and peers of peers)"
     ),
 ):
     """Run horizontal sync across local vaults."""
@@ -249,6 +217,7 @@ def hsync(
             file_filter=file,
             dry_run=dry_run,
             non_interactive=non_interactive,
+            cascade=cascade,
         )
 
         if exit_code == 0:
@@ -300,27 +269,39 @@ def doctor():
             if not vault_path.exists():
                 issues.append(f"Vault not found at {vault_location}")
 
-        # Check local.yaml
-        local_path = cast_dir / "local.yaml"
-        if not local_path.exists():
-            warnings.append("local.yaml not found (run 'cast setup')")
-        else:
-            with open(local_path) as f:
-                local_config = yaml.load(f)
-
-            if local_config:
-                # Check installed vaults
-                for vault in local_config.get("installed-vaults", []):
-                    vault_path = Path(vault["filepath"])
-                    if not vault_path.exists():
-                        warnings.append(
-                            f"Vault '{vault['name']}' path not found: {vault['filepath']}"
-                        )
+            # Check registry installation state
+            try:
+                entries = list_casts()
+                installed = any(
+                    e.cast_id == config.get("cast-id") and e.root == root for e in entries
+                )
+                if not installed:
+                    warnings.append(
+                        "This Cast is not installed in the machine registry. Run 'cast install .'"
+                    )
+            except Exception as e:
+                warnings.append(f"Could not read machine registry: {e}")
 
         # Check syncstate.json
         syncstate_path = cast_dir / "syncstate.json"
         if not syncstate_path.exists():
             warnings.append("syncstate.json not found (will be created on first sync)")
+
+        # Validate that referenced peers are resolvable via the machine registry
+        try:
+            if config_path.exists() and not issues:
+                vault_location = config.get("cast-location", "01 Vault")
+                vault_path = root / vault_location
+                if vault_path.exists():
+                    idx = build_ephemeral_index(root, vault_path, fixup=False)
+                    for peer in sorted(idx.all_peers()):
+                        if not resolve_cast_by_name(peer):
+                            warnings.append(
+                                f"Peer '{peer}' not found in machine registry. "
+                                "Install that peer with 'cast install .' in its root."
+                            )
+        except Exception as e:
+            warnings.append(f"Peer check skipped due to error: {e}")
 
         # Report
         if issues:

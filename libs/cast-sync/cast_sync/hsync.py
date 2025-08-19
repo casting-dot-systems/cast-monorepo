@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Optional, Set
 
-from cast_core import CastConfig, LocalConfig, SyncState, SyncStateEntry
+from cast_core import CastConfig, SyncState, SyncStateEntry
 from cast_core.registry import load_registry, resolve_cast_by_name
 
 from cast_sync.conflict import ConflictResolution, handle_conflict
@@ -37,6 +38,7 @@ class SyncPlan:
     local_path: Path
     peer_name: str
     peer_path: Path | None
+    peer_root: Path | None
     decision: SyncDecision
     local_digest: str
     peer_digest: str | None
@@ -52,7 +54,6 @@ class HorizontalSync:
 
         # Load configs
         self.config = self._load_config()
-        self.local_config = self._load_local_config()
         self.syncstate = self._load_syncstate()
 
         # Vault path
@@ -71,20 +72,6 @@ class HorizontalSync:
         with open(config_path) as f:
             data = yaml.load(f)
         return CastConfig(**data)
-
-    def _load_local_config(self) -> LocalConfig:
-        """Load local config."""
-        local_path = self.cast_dir / "local.yaml"
-        if not local_path.exists():
-            # Return empty config
-            return LocalConfig(**{"path-to-root": str(self.root_path)})
-
-        import ruamel.yaml
-
-        yaml = ruamel.yaml.YAML()
-        with open(local_path) as f:
-            data = yaml.load(f)
-        return LocalConfig(**data)
 
     def _load_syncstate(self) -> SyncState:
         """Load sync state."""
@@ -132,20 +119,64 @@ class HorizontalSync:
             json.dump(data, f, indent=2)
         temp_path.replace(syncstate_path)
 
+    def _load_peer_syncstate(self, peer_root: Path) -> SyncState:
+        """Load (or create empty) syncstate for a peer root."""
+        path = peer_root / ".cast" / "syncstate.json"
+        if not path.exists():
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            return SyncState(version=1, updated_at=now, baselines={})
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        baselines = {}
+        for cast_id, peers in data.get("baselines", {}).items():
+            baselines[cast_id] = {}
+            for peer_name, entry in peers.items():
+                baselines[cast_id][peer_name] = SyncStateEntry(**entry)
+        return SyncState(
+            version=data.get("version", 1),
+            updated_at=data.get("updated_at", ""),
+            baselines=baselines,
+        )
+
+    def _save_peer_syncstate(self, peer_root: Path, state: SyncState) -> None:
+        """Persist peer syncstate atomically."""
+        path = peer_root / ".cast" / "syncstate.json"
+        data = {
+            "version": state.version,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "baselines": {},
+        }
+        for cast_id, peers in state.baselines.items():
+            data["baselines"][cast_id] = {}
+            for peer_name, entry in peers.items():
+                data["baselines"][cast_id][peer_name] = {"digest": entry.digest, "ts": entry.ts}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f".{path.name}.casttmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(path)
+
+    def _update_baseline_both(self, cast_id: str, peer_name: str, digest: str, peer_root: Path | None) -> None:
+        """Update baselines in local and peer syncstate (symmetrically)."""
+        self._update_baseline(cast_id, peer_name, digest)
+        if peer_root is None:
+            return
+        # In peer's syncstate, the peer name key should be *our* name.
+        their_state = self._load_peer_syncstate(peer_root)
+        if cast_id not in their_state.baselines:
+            their_state.baselines[cast_id] = {}
+        their_state.baselines[cast_id][self.config.cast_name] = SyncStateEntry(
+            digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
+        self._save_peer_syncstate(peer_root, their_state)
+
     def _resolve_peer_vault_path(self, peer_name: str) -> Path | None:
         """Resolve a peer vault folder path by name.
 
-        Priority:
-          1) legacy .cast/local.yaml installed-vaults (if present),
-          2) machine registry (resolve_cast_by_name),
-          3) None (unresolved).
+        Resolution:
+          • machine registry (resolve_cast_by_name),
+          • None (unresolved).
         """
-        # 1) legacy local.yaml
-        for v in self.local_config.installed_vaults:
-            if v.name == peer_name:
-                return Path(v.filepath)
-
-        # 2) registry
         entry = resolve_cast_by_name(peer_name)
         if entry:
             return entry.root / entry.vault_location
@@ -202,19 +233,14 @@ class HorizontalSync:
 
         return SyncDecision.NO_OP
 
-    def sync(
+    def _sync_core(
         self,
         peer_filter: list[str] | None = None,
         file_filter: str | None = None,
         dry_run: bool = False,
         non_interactive: bool = False,
     ) -> int:
-        """
-        Run horizontal sync.
-
-        Returns:
-            Exit code (0=success, 1=warnings, 2=fatal, 3=conflicts)
-        """
+        """Internal core logic (single-root, no cascade)."""
         # Build local index
         logger.info(f"Indexing local vault: {self.vault_path}")
         local_index = build_ephemeral_index(
@@ -277,6 +303,7 @@ class HorizontalSync:
                 local_path = self.vault_path / local_rec["relpath"]
                 peer_path = None
                 peer_digest = None
+                peer_root: Path | None = None
 
                 if peer_rec:
                     peer_path = peer_vault_path / peer_rec["relpath"]
@@ -286,6 +313,7 @@ class HorizontalSync:
                     peer_path = peer_vault_path / local_rec["relpath"]
 
                 baseline_digest = None
+                peer_root = peer_vault_path.parent
                 if (
                     local_rec["cast_id"] in self.syncstate.baselines
                     and peer_name in self.syncstate.baselines[local_rec["cast_id"]]
@@ -299,6 +327,7 @@ class HorizontalSync:
                     local_path=local_path,
                     peer_name=peer_name,
                     peer_path=peer_path,
+                    peer_root=peer_root,
                     decision=decision,
                     local_digest=local_rec["digest"],
                     peer_digest=peer_digest,
@@ -326,7 +355,9 @@ class HorizontalSync:
                     and plan.peer_digest is not None
                     and plan.local_digest == plan.peer_digest
                 ):
-                    self._update_baseline(plan.cast_id, plan.peer_name, plan.local_digest)
+                    self._update_baseline_both(
+                        plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                    )
                 continue
 
             logger.info(
@@ -338,7 +369,9 @@ class HorizontalSync:
                     # Copy peer to local
                     if plan.peer_path:
                         shutil.copy2(plan.peer_path, plan.local_path)
-                        self._update_baseline(plan.cast_id, plan.peer_name, plan.peer_digest)
+                        self._update_baseline_both(
+                            plan.cast_id, plan.peer_name, plan.peer_digest or "", plan.peer_root
+                        )
 
                 elif plan.decision in (SyncDecision.PUSH, SyncDecision.CREATE_PEER):
                     # Copy local to peer
@@ -367,7 +400,9 @@ class HorizontalSync:
                                 dest_path = candidate
 
                         shutil.copy2(plan.local_path, dest_path)
-                        self._update_baseline(plan.cast_id, plan.peer_name, plan.local_digest)
+                        self._update_baseline_both(
+                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                        )
 
                 elif plan.decision == SyncDecision.CONFLICT:
                     # Handle conflict
@@ -381,11 +416,22 @@ class HorizontalSync:
                     )
 
                     if resolution == ConflictResolution.KEEP_LOCAL:
-                        self._update_baseline(plan.cast_id, plan.peer_name, plan.local_digest)
+                        # overwrite peer with local, then update baselines on both sides
+                        if plan.peer_path:
+                            plan.peer_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(plan.local_path, plan.peer_path)
+                        self._update_baseline_both(
+                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                        )
                     elif resolution == ConflictResolution.KEEP_PEER:
                         if plan.peer_path:
                             shutil.copy2(plan.peer_path, plan.local_path)
-                            self._update_baseline(plan.cast_id, plan.peer_name, plan.peer_digest)
+                            self._update_baseline_both(
+                                plan.cast_id,
+                                plan.peer_name,
+                                plan.peer_digest or "",
+                                plan.peer_root,
+                            )
                     else:
                         # Skip - baseline not updated
                         conflicts.append(plan)
@@ -411,3 +457,39 @@ class HorizontalSync:
         self.syncstate.baselines[cast_id][peer_name] = SyncStateEntry(
             digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M")
         )
+
+    def sync(
+        self,
+        peer_filter: list[str] | None = None,
+        file_filter: str | None = None,
+        dry_run: bool = False,
+        non_interactive: bool = False,
+        cascade: bool = True,
+        visited_roots: Set[Path] | None = None,
+    ) -> int:
+        """Run horizontal sync (optionally cascading to peers-of-peers)."""
+        # core run for this root
+        code = self._sync_core(peer_filter, file_filter, dry_run, non_interactive)
+        if not cascade:
+            return code
+
+        # discover direct peers and recurse
+        visited_roots = visited_roots or set()
+        visited_roots.add(self.root_path.resolve())
+
+        # Build local index (again) to get peers; cheap enough
+        local_index = build_ephemeral_index(self.root_path, self.vault_path, fixup=True, limit_file=file_filter)
+        peers = local_index.all_peers()
+        for name in peers:
+            vpath = self._resolve_peer_vault_path(name)
+            if not vpath:
+                continue
+            peer_root = vpath.parent.resolve()
+            if peer_root in visited_roots:
+                continue
+            try:
+                code2 = HorizontalSync(peer_root).sync(None, file_filter, dry_run, non_interactive, cascade=True, visited_roots=visited_roots)
+                code = max(code, code2)
+            except Exception as e:
+                logger.warning(f"Cascade sync failed for peer '{name}' at {peer_root}: {e}")
+        return code

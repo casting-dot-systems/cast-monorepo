@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Sync engine for Cast - 3-way sync and conflict handling"
 requires-python = ">=3.10"
 dependencies = [
-    "cast-core"
+    "cast-core",
+    "rich>=13.0.0"
 ]
 
 [tool.hatch.metadata]

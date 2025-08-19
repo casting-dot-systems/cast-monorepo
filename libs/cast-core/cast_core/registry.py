@@ -138,3 +138,36 @@ def resolve_cast_by_name(name: str) -> Optional[CastEntry]:
         if data.get("name") == name:
             return _entry_from_reg(cid, data)
     return None
+
+
+def unregister_cast(*, cast_id: Optional[str] = None, name: Optional[str] = None, root: Optional[Path] = None) -> Optional[CastEntry]:
+    """
+    Remove a Cast from the machine registry.
+    You may specify by cast_id, name, or root path.
+    Returns the removed CastEntry if found, else None.
+    """
+    reg = load_registry()
+    casts = reg.get("casts", {})
+    target_id: Optional[str] = None
+
+    if cast_id and cast_id in casts:
+        target_id = cast_id
+    elif name:
+        for cid, data in casts.items():
+            if data.get("name") == name:
+                target_id = cid
+                break
+    elif root:
+        root_str = str(root.expanduser().resolve())
+        for cid, data in casts.items():
+            if data.get("root") == root_str:
+                target_id = cid
+                break
+
+    if not target_id:
+        return None
+
+    payload = casts.pop(target_id)
+    reg["casts"] = casts
+    save_registry(reg)
+    return _entry_from_reg(target_id, payload)

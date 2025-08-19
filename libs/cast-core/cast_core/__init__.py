@@ -10,11 +10,11 @@ from cast_core.registry import (
     list_casts,
     resolve_cast_by_name,
     resolve_cast_by_id,
+    unregister_cast,
 )
 from cast_core.models import (
     CastConfig,
     FileRec,
-    LocalConfig,
     SyncState,
     SyncStateEntry,
 )
@@ -38,9 +38,9 @@ __all__ = [
     "list_casts",
     "resolve_cast_by_name",
     "resolve_cast_by_id",
+    "unregister_cast",
     "CastConfig",
     "FileRec",
-    "LocalConfig",
     "SyncState",
     "SyncStateEntry",
     "parse_cast_file",

@@ -1,10 +1,11 @@
 """YAML front matter parsing and manipulation."""
 
-import re
+import re as _re
 import uuid
 from io import StringIO
 from pathlib import Path
 from typing import Any
+import re
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -18,6 +19,7 @@ yaml.width = 4096  # Avoid line wrapping
 
 CAST_FIELDS_ORDER = ["cast-id", "cast-vaults", "cast-codebases", "cast-version"]
 VAULT_ENTRY_REGEX = re.compile(r"^\s*(?P<name>[^()]+?)\s*\((?P<mode>live|watch)\)\s*$")
+FM_RE = _re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", _re.DOTALL)
 
 
 def parse_cast_file(filepath: Path) -> tuple[dict[str, Any] | None, str, bool]:
@@ -29,19 +31,13 @@ def parse_cast_file(filepath: Path) -> tuple[dict[str, Any] | None, str, bool]:
     """
     content = filepath.read_text(encoding="utf-8")
 
-    # Check for front matter
-    if not content.startswith("---\n"):
+    # Find front matter (supports LF and CRLF)
+    m = FM_RE.match(content)
+    if not m:
         return None, content, False
 
-    # Find end of front matter
-    try:
-        end_idx = content.index("\n---\n", 4)
-    except ValueError:
-        # No closing delimiter
-        return None, content, False
-
-    yaml_text = content[4:end_idx]
-    body = content[end_idx + 5 :]  # Skip "\n---\n"
+    yaml_text = m.group(1)
+    body = content[m.end() :]
 
     try:
         front_matter = yaml.load(yaml_text)
