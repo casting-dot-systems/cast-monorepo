@@ -7,14 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Set
 
 from cast_core import CastConfig, SyncState, SyncStateEntry
 from cast_core.registry import load_registry, resolve_cast_by_name
+from cast_core.yamlio import parse_cast_file
 
 from cast_sync.conflict import ConflictResolution, handle_conflict
 from cast_sync.index import EphemeralIndex, build_ephemeral_index
-from cast_core.yamlio import parse_cast_file
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +25,8 @@ class SyncDecision(Enum):
     PULL = "pull"
     PUSH = "push"
     CONFLICT = "conflict"
+    DELETE_LOCAL = "delete_local"   # accept deletion from peer
+    DELETE_PEER = "delete_peer"     # propagate deletion to peer
     CREATE_PEER = "create_peer"
     CREATE_LOCAL = "create_local"
 
@@ -125,7 +126,7 @@ class HorizontalSync:
         if not path.exists():
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
             return SyncState(version=1, updated_at=now, baselines={})
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         baselines = {}
         for cast_id, peers in data.get("baselines", {}).items():
@@ -182,6 +183,66 @@ class HorizontalSync:
             return entry.root / entry.vault_location
         return None
 
+    def _index_peer(
+        self,
+        peer_name: str,
+        *,
+        limit_file: str | None = None,
+        existing_index: EphemeralIndex | None = None,
+    ) -> tuple[Path, EphemeralIndex] | None:
+        """
+        Resolve and index a peer vault. If `existing_index` is provided, merge
+        newly discovered records into it (used for incremental, per-file indexing).
+        """
+        peer_vault_path = self._resolve_peer_vault_path(peer_name)
+        if not peer_vault_path:
+            logger.warning(f"Peer '{peer_name}' not found (not in machine registry).")
+            return None
+        if not peer_vault_path.exists():
+            logger.warning(f"Peer vault path does not exist: {peer_vault_path}")
+            return None
+
+        peer_root = peer_vault_path.parent
+        peer_cast_dir = peer_root / ".cast"
+        if not peer_cast_dir.exists():
+            logger.warning(
+                f"Peer '{peer_name}' is missing .cast/ at {peer_root}; skip. Install the peer with 'cast install'."
+            )
+            return None
+
+        scope = f" (limited to {limit_file})" if limit_file else ""
+        logger.info(f"Indexing peer {peer_name}{scope}: {peer_vault_path}")
+        tmp_index = build_ephemeral_index(
+            peer_root,
+            peer_vault_path,
+            fixup=False,
+            limit_file=limit_file,
+        )
+
+        if existing_index is None:
+            return peer_vault_path, tmp_index
+
+        # Merge tmp_index into existing_index
+        for rec in tmp_index.by_id.values():
+            existing_index.add_file(rec)
+        return peer_vault_path, existing_index
+
+    def _clear_baseline_both(self, cast_id: str, peer_name: str, peer_root: Path | None) -> None:
+        """Remove baselines for (cast_id, peer_name) in both local and peer syncstate."""
+        # local
+        if cast_id in self.syncstate.baselines:
+            self.syncstate.baselines[cast_id].pop(peer_name, None)
+            if not self.syncstate.baselines[cast_id]:
+                self.syncstate.baselines.pop(cast_id, None)
+        # peer
+        if peer_root is not None:
+            their_state = self._load_peer_syncstate(peer_root)
+            if cast_id in their_state.baselines:
+                their_state.baselines[cast_id].pop(self.config.cast_name, None)
+                if not their_state.baselines[cast_id]:
+                    their_state.baselines.pop(cast_id, None)
+            self._save_peer_syncstate(peer_root, their_state)
+
     def _decide_sync(self, local_rec, peer_rec, peer_name: str, mode: str) -> SyncDecision:
         """
         Decide 3-way sync action for a file/peer pair.
@@ -195,19 +256,18 @@ class HorizontalSync:
             baseline = self.syncstate.baselines[cast_id][peer_name].digest
 
         if peer_rec is None:
-            # Peer doesn't have file
+            # Peer doesn't have the file at all
             if baseline is None:
-                # First contact
-                if mode == "live":
-                    return SyncDecision.CREATE_PEER
-                else:
-                    return SyncDecision.NO_OP
+                # First contact; only push if live
+                return SyncDecision.CREATE_PEER if mode == "live" else SyncDecision.NO_OP
             else:
-                # File existed before, recreate
-                if mode == "live":
-                    return SyncDecision.CREATE_PEER
+                # Baseline exists → peer deleted OR never had it after baseline
+                # If local unchanged since baseline → fast-forward accept deletion (delete local)
+                # Otherwise it's a conflict (peer missing vs local modified)
+                if local_digest == baseline:
+                    return SyncDecision.DELETE_LOCAL
                 else:
-                    return SyncDecision.NO_OP
+                    return SyncDecision.CONFLICT
 
         peer_digest = peer_rec["digest"]
 
@@ -247,53 +307,40 @@ class HorizontalSync:
             self.root_path, self.vault_path, fixup=True, limit_file=file_filter
         )
 
-        # Discover peers
-        all_peers = local_index.all_peers()
+        # Discover peers from local records, skipping self
+        discovered = local_index.all_peers()
+        if self.config.cast_name in discovered:
+            discovered.discard(self.config.cast_name)
+            logger.info(f"Skipping self in peer set: {self.config.cast_name}")
         if peer_filter:
-            all_peers = all_peers.intersection(set(peer_filter))
+            discovered = discovered.intersection(set(peer_filter))
+        logger.info(f"Found peers: {discovered}")
 
-        logger.info(f"Found peers: {all_peers}")
-
-        # Index each peer
+        # We'll index peers lazily per file (and cache)
         peer_indices: dict[str, tuple[Path, EphemeralIndex]] = {}
-        for peer_name in all_peers:
-            # Resolve peer path from local.yaml or registry
-            peer_vault_path = self._resolve_peer_vault_path(peer_name)
-            if not peer_vault_path:
-                logger.warning(
-                    f"Peer '{peer_name}' not found (neither in local.yaml nor in machine registry)."
-                )
-                continue
-
-            if not peer_vault_path.exists():
-                logger.warning(f"Peer vault path does not exist: {peer_vault_path}")
-                continue
-
-            # Peer root is parent of vault path
-            peer_root = peer_vault_path.parent
-            peer_cast_dir = peer_root / ".cast"
-            if not peer_cast_dir.exists():
-                logger.warning(
-                    f"Peer '{peer_name}' is missing .cast/ at {peer_root}; skip. Install the peer with 'cast install'."
-                )
-                continue
-
-            # Index peer
-            logger.info(f"Indexing peer {peer_name}: {peer_vault_path}")
-            peer_index = build_ephemeral_index(
-                peer_root,
-                peer_vault_path,
-                fixup=False,  # Don't modify peer files during index
-            )
-            peer_indices[peer_name] = (peer_vault_path, peer_index)
 
         # Build sync plan
         plans: list[SyncPlan] = []
 
         for local_rec in local_index.by_id.values():
             for peer_name, mode in local_rec["peers"].items():
-                if peer_name not in peer_indices:
+                # respect peer filter and skip self
+                if peer_filter and peer_name not in peer_filter:
                     continue
+                if peer_name == self.config.cast_name:
+                    continue
+                # Ensure this peer is indexed (limited to this file's relpath for speed)
+                pair = peer_indices.get(peer_name)
+                if pair is None:
+                    pair = self._index_peer(peer_name, limit_file=local_rec["relpath"])
+                    if pair is None:
+                        continue
+                    peer_indices[peer_name] = pair
+                else:
+                    # augment index with this specific relpath, if it wasn't scanned yet
+                    peer_indices[peer_name] = self._index_peer(
+                        peer_name, limit_file=local_rec["relpath"], existing_index=pair[1]
+                    ) or pair
 
                 peer_vault_path, peer_index = peer_indices[peer_name]
                 peer_rec = peer_index.get_by_id(local_rec["cast_id"])
@@ -330,6 +377,55 @@ class HorizontalSync:
                     peer_root=peer_root,
                     decision=decision,
                     local_digest=local_rec["digest"],
+                    peer_digest=peer_digest,
+                    baseline_digest=baseline_digest,
+                )
+                plans.append(plan)
+
+        # Deletion pass: local file missing but baseline exists → decide per peer
+        # We look at baselines not represented in local_index to capture local deletions.
+        for cast_id, peers_map in list(self.syncstate.baselines.items()):
+            if cast_id in local_index.by_id:
+                continue  # still present locally; handled above
+            for peer_name in list(peers_map.keys()):
+                if peer_filter and peer_name not in (peer_filter or []):
+                    continue
+                # Make sure the peer is indexed (full scan: we need to find cast-id anywhere)
+                pair = peer_indices.get(peer_name)
+                if pair is None:
+                    pair = self._index_peer(peer_name)  # full index to locate cast_id
+                    if pair is None:
+                        continue
+                    peer_indices[peer_name] = pair
+                peer_vault_path, peer_index = peer_indices[peer_name]
+                peer_rec = peer_index.get_by_id(cast_id)
+                baseline_digest = self.syncstate.baselines[cast_id][peer_name].digest
+
+                # Synthesize paths/digests for planning
+                # If we need a local path for conflicts/sidecars, default to peer path name or cast_id
+                local_rel = (peer_rec["relpath"] if peer_rec else f"{cast_id}.md")
+                local_path = self.vault_path / local_rel
+                peer_path = (peer_vault_path / peer_rec["relpath"]) if peer_rec else None
+                peer_digest = peer_rec["digest"] if peer_rec else None
+
+                if peer_rec is None:
+                    # Both sides missing → just clear baselines
+                    self._clear_baseline_both(cast_id, peer_name, peer_vault_path.parent)
+                    continue
+
+                if peer_digest == baseline_digest:
+                    decision = SyncDecision.DELETE_PEER  # propagate local deletion
+                else:
+                    decision = SyncDecision.CONFLICT     # local missing vs peer changed
+
+                plan = SyncPlan(
+                    cast_id=cast_id,
+                    local_path=local_path,
+                    peer_name=peer_name,
+                    peer_path=peer_path,
+                    peer_root=peer_vault_path.parent,
+                    decision=decision,
+                    local_digest="",  # local missing
                     peer_digest=peer_digest,
                     baseline_digest=baseline_digest,
                 )
@@ -404,6 +500,17 @@ class HorizontalSync:
                             plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
                         )
 
+                elif plan.decision == SyncDecision.DELETE_LOCAL:
+                    # Accept peer deletion: remove local and clear baselines both sides
+                    plan.local_path.unlink(missing_ok=True)
+                    self._clear_baseline_both(plan.cast_id, plan.peer_name, plan.peer_root)
+
+                elif plan.decision == SyncDecision.DELETE_PEER:
+                    # Propagate local deletion: remove peer and clear baselines both sides
+                    if plan.peer_path:
+                        plan.peer_path.unlink(missing_ok=True)
+                    self._clear_baseline_both(plan.cast_id, plan.peer_name, plan.peer_root)
+
                 elif plan.decision == SyncDecision.CONFLICT:
                     # Handle conflict
                     resolution = handle_conflict(
@@ -413,16 +520,24 @@ class HorizontalSync:
                         plan.peer_name,
                         self.root_path,
                         interactive=not non_interactive,
+                        # If local is missing (deletion), show empty local content in preview
+                        local_content=("" if not plan.local_path.exists() else None),
                     )
 
                     if resolution == ConflictResolution.KEEP_LOCAL:
                         # overwrite peer with local, then update baselines on both sides
-                        if plan.peer_path:
-                            plan.peer_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(plan.local_path, plan.peer_path)
-                        self._update_baseline_both(
-                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
-                        )
+                        if plan.local_path.exists():
+                            if plan.peer_path:
+                                plan.peer_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(plan.local_path, plan.peer_path)
+                            self._update_baseline_both(
+                                plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                            )
+                        else:
+                            # conflict due to local deletion; KEEP_LOCAL means keep deletion → delete peer
+                            if plan.peer_path:
+                                plan.peer_path.unlink(missing_ok=True)
+                            self._clear_baseline_both(plan.cast_id, plan.peer_name, plan.peer_root)
                     elif resolution == ConflictResolution.KEEP_PEER:
                         if plan.peer_path:
                             shutil.copy2(plan.peer_path, plan.local_path)
@@ -465,7 +580,7 @@ class HorizontalSync:
         dry_run: bool = False,
         non_interactive: bool = False,
         cascade: bool = True,
-        visited_roots: Set[Path] | None = None,
+        visited_roots: set[Path] | None = None,
     ) -> int:
         """Run horizontal sync (optionally cascading to peers-of-peers)."""
         # core run for this root
@@ -480,6 +595,9 @@ class HorizontalSync:
         # Build local index (again) to get peers; cheap enough
         local_index = build_ephemeral_index(self.root_path, self.vault_path, fixup=True, limit_file=file_filter)
         peers = local_index.all_peers()
+        # Skip self on cascade too
+        if self.config.cast_name in peers:
+            peers.discard(self.config.cast_name)
         for name in peers:
             vpath = self._resolve_peer_vault_path(name)
             if not vpath:

@@ -205,3 +205,95 @@ def test_safe_push_rename_when_peer_has_different_cast_id(env, tmp_path: Path):
     # renamed copy exists
     renamed = root2 / "01 Vault" / "conflict (~from vault1).md"
     assert renamed.exists(), "renamed file should exist to avoid destructive overwrite"
+
+
+def test_delete_local_propagates_to_peer(env, tmp_path: Path):
+    # Setup vault1 and vault2
+    root1 = tmp_path / "d1"
+    root2 = tmp_path / "d2"
+    root1.mkdir()
+    root2.mkdir()
+
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["init", "--name", "vault1"], env=env).exit_code == 0
+        assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
+        os.chdir(root2)
+        assert runner.invoke(app, ["init", "--name", "vault2"], env=env).exit_code == 0
+        assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
+    finally:
+        os.chdir(old_cwd)
+
+    cid = "33333333-3333-3333-3333-333333333333"
+    rel = Path("01 Vault") / "to-delete.md"
+    note_text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Del", body="X")
+    _write_file(root1 / rel, note_text)
+
+    # Initial sync: push to peer
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["hsync", "--non-interactive"], env=env).exit_code in (0, 3)
+    finally:
+        os.chdir(old_cwd)
+    assert (root2 / rel).exists()
+
+    # Delete locally and sync: peer should be deleted, baseline cleared
+    (root1 / rel).unlink()
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["hsync", "--non-interactive"], env=env).exit_code in (0, 3)
+    finally:
+        os.chdir(old_cwd)
+
+    assert not (root2 / rel).exists(), "peer file should be deleted after local deletion"
+    state = json.loads((root1 / ".cast" / "syncstate.json").read_text(encoding="utf-8"))
+    assert cid not in state.get("baselines", {}), "baseline should be cleared after deletion"
+
+
+def test_delete_peer_pulls_delete_locally(env, tmp_path: Path):
+    # Setup vaults
+    root1 = tmp_path / "pd1"
+    root2 = tmp_path / "pd2"
+    root1.mkdir()
+    root2.mkdir()
+
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["init", "--name", "vault1"], env=env).exit_code == 0
+        assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
+        os.chdir(root2)
+        assert runner.invoke(app, ["init", "--name", "vault2"], env=env).exit_code == 0
+        assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
+    finally:
+        os.chdir(old_cwd)
+
+    cid = "44444444-4444-4444-4444-444444444444"
+    rel = Path("01 Vault") / "peer-deletes.md"
+    text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="PeerDel", body="Z")
+    _write_file(root1 / rel, text)
+
+    # Initial sync to establish baseline on both
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["hsync", "--non-interactive"], env=env).exit_code in (0, 3)
+    finally:
+        os.chdir(old_cwd)
+    assert (root2 / rel).exists()
+
+    # Peer deletes
+    (root2 / rel).unlink()
+
+    # Sync from root1: since local == baseline and peer missing → DELETE_LOCAL
+    try:
+        os.chdir(root1)
+        assert runner.invoke(app, ["hsync", "--non-interactive"], env=env).exit_code in (0, 3)
+    finally:
+        os.chdir(old_cwd)
+
+    assert not (root1 / rel).exists(), "local file should be deleted after peer deletion"
+    state = json.loads((root1 / ".cast" / "syncstate.json").read_text(encoding="utf-8"))
+    assert cid not in state.get("baselines", {}), "baseline should be cleared after pulled deletion"
