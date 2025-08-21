@@ -383,8 +383,24 @@ class HorizontalSync:
                 plans.append(plan)
 
         # Deletion pass: local file missing but baseline exists → decide per peer
-        # We look at baselines not represented in local_index to capture local deletions.
+        # IMPORTANT: when file_filter is set, we must NOT treat non-scanned files as deleted.
+        # We therefore restrict the deletion pass to the filtered cast-id (if resolvable), or skip it.
+        allowed_ids: set[str] | None = None
+        if file_filter:
+            allowed_ids = set()
+            # If filter matches a known cast-id in baselines, restrict to that
+            if file_filter in self.syncstate.baselines:
+                allowed_ids.add(file_filter)
+            else:
+                # If filter was a relpath we scanned (and exists), map to its cast-id
+                rec = local_index.get_by_path(file_filter)
+                if rec:
+                    allowed_ids.add(rec["cast_id"])
+                # else: relpath doesn't exist and we can't map it without full scan → skip deletion pass
+
         for cast_id, peers_map in list(self.syncstate.baselines.items()):
+            if allowed_ids is not None and cast_id not in allowed_ids:
+                continue
             if cast_id in local_index.by_id:
                 continue  # still present locally; handled above
             for peer_name in list(peers_map.keys()):

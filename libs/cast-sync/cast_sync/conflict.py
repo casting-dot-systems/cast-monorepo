@@ -2,16 +2,17 @@
 
 import shutil
 import re
+import difflib
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from rich.columns import Columns
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.console import Group
+from rich.table import Table
+from rich.text import Text
 
 
 class ConflictResolution(Enum):
@@ -59,14 +60,14 @@ def handle_conflict(
     local_sidecar = conflicts_dir / f"{title}~{cast_id}~LOCAL.md"
     peer_sidecar = conflicts_dir / f"{title}~{cast_id}~PEER-{peer_name}.md"
 
-    # Write local version
-    if local_content:
+    # Write local version (write even if empty string was provided)
+    if local_content is not None:
         local_sidecar.write_text(local_content, encoding="utf-8")
     elif local_path.exists():
         shutil.copy2(local_path, local_sidecar)
 
-    # Write peer version
-    if peer_content:
+    # Write peer version (write even if empty string was provided)
+    if peer_content is not None:
         peer_sidecar.write_text(peer_content, encoding="utf-8")
     elif peer_path and peer_path.exists():
         shutil.copy2(peer_path, peer_sidecar)
@@ -99,48 +100,60 @@ def handle_conflict(
         body = text[m.end():]
         return yaml_text, body
 
-    def _render_preview(content: str) -> Group:
-        yaml_text, body = _split_front_matter(content or "")
-        blocks = []
-        if yaml_text is not None:
-            blocks.append(
-                Panel(
-                    Syntax(yaml_text, "yaml", word_wrap=True),
-                    title="YAML front matter",
-                    expand=True,
-                )
-            )
-        else:
-            blocks.append(
-                Panel(
-                    "[dim]No front matter[/dim]",
-                    title="YAML front matter",
-                    expand=True,
-                )
-            )
-        blocks.append(Panel(Markdown(body or ""), title="Markdown body", expand=True))
-        return Group(*blocks)
+    def _render_side_by_side(a: str, b: str, title_left: str, title_right: str) -> Table:
+        """
+        Render a side-by-side, line-diffed table using Rich.
+        """
+        a_lines = (a or "").splitlines()
+        b_lines = (b or "").splitlines()
+        sm = difflib.SequenceMatcher(a=a_lines, b=b_lines)
+
+        table = Table.grid(expand=True)
+        table.add_column(f"{title_left}", ratio=1)
+        table.add_column(f"{title_right}", ratio=1)
+
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            # Max width approach: iterate longest span
+            span = max(i2 - i1, j2 - j1)
+            for k in range(span):
+                left_txt = a_lines[i1 + k] if (i1 + k) < i2 else ""
+                right_txt = b_lines[j1 + k] if (j1 + k) < j2 else ""
+
+                l = Text(left_txt)
+                r = Text(right_txt)
+                if tag == "equal":
+                    # Keep normal styling; could dim if desired:
+                    # l.stylize("dim"); r.stylize("dim")
+                    pass
+                elif tag == "replace":
+                    l.stylize("bold red")
+                    r.stylize("bold green")
+                elif tag == "delete":
+                    l.stylize("bold red")
+                elif tag == "insert":
+                    r.stylize("bold green")
+                table.add_row(l, r)
+        return table
 
     if interactive:
         console.rule("[bold red]Conflict detected[/bold red]")
-        console.print(
-            Columns(
-                [
-                    Panel(
-                        _render_preview(local_preview),
-                        title=f"LOCAL · {local_path.name}",
-                        expand=True,
-                    ),
-                    Panel(
-                        _render_preview(peer_preview),
-                        title=f"PEER[{peer_name}] · {peer_path.name if peer_path else '(missing)'}",
-                        expand=True,
-                    ),
-                ],
-                equal=True,
-                expand=True,
-            )
+        # Split both sides into (yaml, body)
+        local_yaml, local_body = _split_front_matter(local_preview or "")
+        peer_yaml, peer_body = _split_front_matter(peer_preview or "")
+
+        # YAML diff (empty string if missing)
+        yaml_left = local_yaml if local_yaml is not None else ""
+        yaml_right = peer_yaml if peer_yaml is not None else ""
+        yaml_table = _render_side_by_side(
+            yaml_left, yaml_right, "LOCAL (YAML)", f"PEER[{peer_name}] (YAML)"
         )
+        console.print(Panel(yaml_table, title="YAML front matter (side-by-side diff)", expand=True))
+
+        # Body diff
+        body_table = _render_side_by_side(
+            local_body or "", peer_body or "", "LOCAL (body)", f"PEER[{peer_name}] (body)"
+        )
+        console.print(Panel(body_table, title="Markdown body (side-by-side diff)", expand=True))
 
     if not interactive:
         # Non-interactive: keep local
