@@ -7,18 +7,17 @@ import uuid
 from pathlib import Path
 
 import typer
+from cast_core import (
+    list_casts,
+    register_cast,
+    resolve_cast_by_name,
+    unregister_cast,
+)
 from cast_sync import HorizontalSync, build_ephemeral_index
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 from ruamel.yaml import YAML
-
-from cast_core import (
-    register_cast,
-    list_casts,
-    unregister_cast,
-    resolve_cast_by_name,
-)
 
 # Initialize
 app = typer.Typer(help="Cast Sync - Synchronize Markdown files across local vaults")
@@ -211,7 +210,7 @@ def uninstall(
     identifier: str = typer.Argument(
         ...,
         help="Cast identifier: id, name, or path to root",
-    )
+    ),
 ):
     """Uninstall (unregister) a Cast from the machine registry."""
     try:

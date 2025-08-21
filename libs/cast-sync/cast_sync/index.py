@@ -11,7 +11,7 @@ from cast_core import (
     write_cast_file,
 )
 from cast_core.models import FileRec
-from cast_core.yamlio import parse_vault_entries, reorder_cast_fields, CAST_FIELDS_ORDER
+from cast_core.yamlio import parse_vault_entries, reorder_cast_fields
 
 logger = logging.getLogger(__name__)
 

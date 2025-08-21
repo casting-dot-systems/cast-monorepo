@@ -1,11 +1,11 @@
 """YAML front matter parsing and manipulation."""
 
+import re
 import re as _re
 import uuid
 from io import StringIO
 from pathlib import Path
 from typing import Any
-import re
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError

@@ -28,6 +28,8 @@ class SyncDecision(Enum):
     CONFLICT = "conflict"
     DELETE_LOCAL = "delete_local"  # accept deletion from peer
     DELETE_PEER = "delete_peer"  # propagate deletion to peer
+    DELETE_LOCAL = "delete_local"  # accept deletion from peer
+    DELETE_PEER = "delete_peer"  # propagate deletion to peer
     CREATE_PEER = "create_peer"
     CREATE_LOCAL = "create_local"
     RENAME_PEER = "rename_peer"  # rename peer to local path (live)
@@ -418,6 +420,12 @@ class HorizontalSync:
                     peer_indices[peer_name] = pair
                 else:
                     # augment index with this specific relpath, if it wasn't scanned yet
+                    peer_indices[peer_name] = (
+                        self._index_peer(
+                            peer_name, limit_file=local_rec["relpath"], existing_index=pair[1]
+                        )
+                        or pair
+                    )
                     peer_indices[peer_name] = (
                         self._index_peer(
                             peer_name, limit_file=local_rec["relpath"], existing_index=pair[1]

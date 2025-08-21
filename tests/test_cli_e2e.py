@@ -5,13 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Dict
 
 import pytest
-from typer.testing import CliRunner
-
 from cast_cli.cli import app
-
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -45,7 +42,7 @@ def _mk_note(cast_id: str, peers: list[str], title: str, body: str = "Body") -> 
 
 
 @pytest.fixture()
-def env(tmp_path: Path) -> Dict[str, str]:
+def env(tmp_path: Path) -> dict[str, str]:
     """Sandbox environment with isolated CAST_HOME."""
     cast_home = tmp_path / "CAST_HOME"
     cast_home.mkdir()
@@ -63,6 +60,7 @@ def test_full_flow_install_list_sync(env, tmp_path: Path):
 
     # init both
     import os
+
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
@@ -112,7 +110,9 @@ def test_full_flow_install_list_sync(env, tmp_path: Path):
     assert cid in syncstate.get("baselines", {}), "baseline should be recorded for cast-id"
 
     # modify peer, then hsync from vault1 → should PULL
-    _write_file(note2, _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Note A", body="PeerEdit"))
+    _write_file(
+        note2, _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Note A", body="PeerEdit")
+    )
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
@@ -130,12 +130,13 @@ def test_first_contact_identical_sets_baseline(env, tmp_path: Path):
     root2.mkdir()
 
     import os
+
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
         assert runner.invoke(app, ["init", "--name", "vault1"], env=env).exit_code == 0
         assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
-        
+
         os.chdir(root2)
         assert runner.invoke(app, ["init", "--name", "vault2"], env=env).exit_code == 0
         assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
@@ -169,12 +170,13 @@ def test_safe_push_rename_when_peer_has_different_cast_id(env, tmp_path: Path):
     root2.mkdir()
 
     import os
+
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
         assert runner.invoke(app, ["init", "--name", "vault1"], env=env).exit_code == 0
         assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
-        
+
         os.chdir(root2)
         assert runner.invoke(app, ["init", "--name", "vault2"], env=env).exit_code == 0
         assert runner.invoke(app, ["install", "."], env=env).exit_code == 0
@@ -185,7 +187,9 @@ def test_safe_push_rename_when_peer_has_different_cast_id(env, tmp_path: Path):
 
     # local cast-id A
     cid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    _write_file(root1 / rel, _mk_note(cast_id=cid_a, peers=["vault1", "vault2"], title="A", body="A"))
+    _write_file(
+        root1 / rel, _mk_note(cast_id=cid_a, peers=["vault1", "vault2"], title="A", body="A")
+    )
 
     # peer already has a different cast-id B at the same path
     cid_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -215,6 +219,7 @@ def test_delete_local_propagates_to_peer(env, tmp_path: Path):
     root2.mkdir()
 
     import os
+
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
@@ -260,6 +265,7 @@ def test_delete_peer_pulls_delete_locally(env, tmp_path: Path):
     root2.mkdir()
 
     import os
+
     old_cwd = os.getcwd()
     try:
         os.chdir(root1)
