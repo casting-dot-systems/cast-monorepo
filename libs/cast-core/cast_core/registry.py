@@ -105,7 +105,7 @@ def register_cast(root: Path) -> CastEntry:
 
     reg = load_registry()
     reg.setdefault("casts", {})
-    
+
     # Enforce uniqueness by NAME and by ROOT across the registry.
     root_str = str(root)
     to_remove: list[str] = []

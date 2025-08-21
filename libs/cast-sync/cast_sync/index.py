@@ -73,11 +73,31 @@ def build_ephemeral_index(
     # Find all Markdown files
     md_files: list[Path] = []
     if limit_file:
-        # Try to find specific file
-        if vault_path.joinpath(limit_file).exists():
-            md_files = [vault_path / limit_file]
+        # Normalize limit_file to a path relative to the vault, supporting:
+        #  - absolute paths under the vault
+        #  - callers that include the vault folder prefix (e.g. "01 Vault/foo.md")
+        lf = Path(limit_file)
+        candidates: list[Path] = []
+
+        if lf.is_absolute():
+            try:
+                candidates.append(lf.relative_to(vault_path))
+            except ValueError:
+                # Not under this vault; leave empty so we fall back to id lookup.
+                pass
         else:
-            # Maybe it's a cast-id, scan all files
+            if lf.parts and lf.parts[0] == vault_path.name:
+                candidates.append(Path(*lf.parts[1:]))
+            candidates.append(lf)
+
+        for rel in candidates:
+            cand = vault_path / rel
+            if cand.exists():
+                md_files = [cand]
+                break
+
+        if not md_files:
+            # Maybe limit_file was a cast-id; scan all and resolve by id below.
             md_files = list(vault_path.rglob("*.md"))
     else:
         md_files = list(vault_path.rglob("*.md"))

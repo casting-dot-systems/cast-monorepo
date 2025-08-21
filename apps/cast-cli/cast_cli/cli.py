@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 import uuid
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from cast_core import (
     resolve_cast_by_name,
     unregister_cast,
 )
+from cast_core.filelock import cast_lock
 from cast_sync import HorizontalSync, build_ephemeral_index
 from rich.console import Console
 from rich.prompt import Prompt
@@ -33,6 +33,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M",
 )
 logger = logging.getLogger(__name__)
+
 
 def _sanitize_name(name: str) -> str:
     """
@@ -84,9 +85,11 @@ def install(
         if name:
             config_path = root / ".cast" / "config.yaml"
             if not config_path.exists():
-                console.print("[red]Install failed:[/red] .cast/config.yaml not found in the target root")
+                console.print(
+                    "[red]Install failed:[/red] .cast/config.yaml not found in the target root"
+                )
                 raise typer.Exit(2)
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = yaml.load(f) or {}
             cfg["cast-name"] = _sanitize_name(name)
             with open(config_path, "w", encoding="utf-8") as f:
@@ -181,12 +184,12 @@ def init(
         "cast-location": location,
     }
 
-    with open(cast_dir / "config.yaml", "w") as f:
+    with open(cast_dir / "config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(config, f)
 
     # Create empty syncstate
     syncstate = {"version": 1, "updated_at": "", "baselines": {}}
-    with open(cast_dir / "syncstate.json", "w") as f:
+    with open(cast_dir / "syncstate.json", "w", encoding="utf-8") as f:
         json.dump(syncstate, f, indent=2)
 
     console.print(f"[green][OK] Cast initialized: {name}[/green]")
@@ -197,7 +200,9 @@ def init(
     if install_after:
         try:
             entry = register_cast(root)
-            console.print(f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n  root: {entry.root}\n  vault: {entry.vault_path}")
+            console.print(
+                f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n  root: {entry.root}\n  vault: {entry.vault_path}"
+            )
         except Exception as e:
             console.print(f"[red]Note:[/red] init succeeded, but auto-install failed: {e}")
 
@@ -258,7 +263,7 @@ def hsync(
 
         # Check if vault exists
         config_path = root / ".cast" / "config.yaml"
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config_data = yaml.load(f)
 
         vault_path = root / config_data.get("cast-location", "01 Vault")
@@ -269,14 +274,19 @@ def hsync(
         # Run sync
         console.print(f"[cyan]Syncing vault: {vault_path}[/cyan]")
 
-        syncer = HorizontalSync(root)
-        exit_code = syncer.sync(
-            peer_filter=list(peer) if peer else None,
-            file_filter=file,
-            dry_run=dry_run,
-            non_interactive=non_interactive,
-            cascade=cascade,
-        )
+        try:
+            with cast_lock(root):
+                syncer = HorizontalSync(root)
+                exit_code = syncer.sync(
+                    peer_filter=list(peer) if peer else None,
+                    file_filter=file,
+                    dry_run=dry_run,
+                    non_interactive=non_interactive,
+                    cascade=cascade,
+                )
+        except RuntimeError as e:
+            console.print(f"[red]Unable to start sync:[/red] {e}")
+            raise typer.Exit(2)
 
         if exit_code == 0:
             console.print("[green][OK] Sync completed successfully[/green]")
@@ -314,7 +324,7 @@ def doctor():
         if not config_path.exists():
             issues.append("config.yaml not found")
         else:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 config = yaml.load(f)
 
             if not config.get("cast-id"):
@@ -392,7 +402,7 @@ def report():
         from cast_sync import build_ephemeral_index
 
         config_path = root / ".cast" / "config.yaml"
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = yaml.load(f)
 
         vault_path = root / config.get("cast-location", "01 Vault")
