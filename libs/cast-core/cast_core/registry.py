@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ruamel.yaml import YAML
 
@@ -37,11 +37,11 @@ def _now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def _empty_registry() -> Dict[str, Any]:
+def _empty_registry() -> dict[str, Any]:
     return {"version": REGISTRY_VERSION, "updated_at": "", "casts": {}}
 
 
-def load_registry() -> Dict[str, Any]:
+def load_registry() -> dict[str, Any]:
     path = registry_path()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,11 +49,11 @@ def load_registry() -> Dict[str, Any]:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(reg, f, indent=2)
         return reg
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_registry(reg: Dict[str, Any]) -> None:
+def save_registry(reg: dict[str, Any]) -> None:
     path = registry_path()
     reg["version"] = REGISTRY_VERSION
     reg["updated_at"] = _now_ts()
@@ -81,7 +81,7 @@ def _read_cast_config(root: Path) -> tuple[str, str, str]:
     cfg = root / ".cast" / "config.yaml"
     if not cfg.exists():
         raise FileNotFoundError(f"config.yaml not found at: {cfg}")
-    with open(cfg, "r", encoding="utf-8") as f:
+    with open(cfg, encoding="utf-8") as f:
         data = yaml.load(f) or {}
     cast_id = data.get("cast-id")
     cast_name = data.get("cast-name")
@@ -107,7 +107,7 @@ def register_cast(root: Path) -> CastEntry:
     return CastEntry(cast_id=cast_id, name=name, root=root, vault_location=vault_location)
 
 
-def _entry_from_reg(cast_id: str, payload: Dict[str, Any]) -> CastEntry:
+def _entry_from_reg(cast_id: str, payload: dict[str, Any]) -> CastEntry:
     return CastEntry(
         cast_id=cast_id,
         name=payload.get("name", ""),
@@ -124,7 +124,7 @@ def list_casts() -> list[CastEntry]:
     return out
 
 
-def resolve_cast_by_id(cast_id: str) -> Optional[CastEntry]:
+def resolve_cast_by_id(cast_id: str) -> CastEntry | None:
     reg = load_registry()
     data = reg.get("casts", {}).get(cast_id)
     if not data:
@@ -132,7 +132,7 @@ def resolve_cast_by_id(cast_id: str) -> Optional[CastEntry]:
     return _entry_from_reg(cast_id, data)
 
 
-def resolve_cast_by_name(name: str) -> Optional[CastEntry]:
+def resolve_cast_by_name(name: str) -> CastEntry | None:
     reg = load_registry()
     for cid, data in reg.get("casts", {}).items():
         if data.get("name") == name:
@@ -140,7 +140,9 @@ def resolve_cast_by_name(name: str) -> Optional[CastEntry]:
     return None
 
 
-def unregister_cast(*, cast_id: Optional[str] = None, name: Optional[str] = None, root: Optional[Path] = None) -> Optional[CastEntry]:
+def unregister_cast(
+    *, cast_id: str | None = None, name: str | None = None, root: Path | None = None
+) -> CastEntry | None:
     """
     Remove a Cast from the machine registry.
     You may specify by cast_id, name, or root path.
@@ -148,7 +150,7 @@ def unregister_cast(*, cast_id: Optional[str] = None, name: Optional[str] = None
     """
     reg = load_registry()
     casts = reg.get("casts", {})
-    target_id: Optional[str] = None
+    target_id: str | None = None
 
     if cast_id and cast_id in casts:
         target_id = cast_id

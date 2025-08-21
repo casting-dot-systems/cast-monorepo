@@ -1,7 +1,6 @@
 """Test sync decision logic."""
 
 
-
 def test_sync_decision_no_baseline_same():
     """Test sync decision when files are identical with no baseline."""
     # Mock data

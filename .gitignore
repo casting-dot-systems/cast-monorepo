@@ -64,6 +64,19 @@ dmypy.json
 .cast/.lock
 .cast/conflicts/
 
+# Local sandbox used by integration tests and manual runs
+sandbox/*
+!sandbox/.gitkeep
+
+# Python caches
+.ruff_cache/
+.pyright/
+
+# macOS / misc
+
+# Cast temp artifacts
+*.casttmp
+
 # Logs
 *.log
 # Contextr directory

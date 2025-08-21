@@ -1,19 +1,18 @@
 """Conflict resolution for Cast Sync."""
 
-import shutil
-import re
 import difflib
+import re
+import shutil
 from enum import Enum
 from io import StringIO
 from pathlib import Path
-from typing import Optional
 
+from cast_core.yamlio import reorder_cast_fields
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from ruamel.yaml import YAML
-from cast_core.yamlio import reorder_cast_fields
 
 
 class ConflictResolution(Enum):
@@ -89,7 +88,7 @@ def handle_conflict(
     except Exception:
         local_preview, peer_preview = "", ""
 
-    def _split_front_matter(text: str) -> tuple[Optional[str], str]:
+    def _split_front_matter(text: str) -> tuple[str | None, str]:
         """
         Split markdown into (yaml_text, body) if front matter exists; else (None, text).
         Recognizes common '---\\n...\\n---' front matter at file start.
@@ -191,7 +190,9 @@ def handle_conflict(
             f"[bold]Left:[/bold] LOCAL ([cyan]{cast_name}[/cyan])",
             f"[bold]Right:[/bold] PEER [[magenta]{peer_name}[/magenta]]",
         )
-        legend.add_row("[red]Red[/red]: change/delete in LOCAL", "[green]Green[/green]: add/change in PEER")
+        legend.add_row(
+            "[red]Red[/red]: change/delete in LOCAL", "[green]Green[/green]: add/change in PEER"
+        )
         console.print(Panel(legend, title="Diff legend", expand=True))
 
         # Split both sides into (yaml, body)
