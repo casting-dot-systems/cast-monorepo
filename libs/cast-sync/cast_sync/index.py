@@ -11,7 +11,7 @@ from cast_core import (
     write_cast_file,
 )
 from cast_core.models import FileRec
-from cast_core.yamlio import parse_vault_entries
+from cast_core.yamlio import parse_vault_entries, reorder_cast_fields, CAST_FIELDS_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +90,30 @@ def build_ephemeral_index(
             if not has_cast_fields:
                 continue
 
-            # Ensure cast fields if needed
+            # Ensure cast fields and canonicalize order (including last-updated first)
             if fixup and front_matter:
                 front_matter, modified = ensure_cast_fields(front_matter, generate_id=True)
-                if modified:
+
+                # Determine if YAML needs reordering even if no fields were added
+                need_reorder = False
+                try:
+                    keys = list(front_matter.keys())
+                    # Enforce 'last-updated' first when present
+                    if "last-updated" in front_matter:
+                        if not keys or keys[0] != "last-updated":
+                            need_reorder = True
+                    # Enforce canonical cast-* ordering
+                    # Compare current key order to reorder_cast_fields result
+                    reordered = reorder_cast_fields(dict(front_matter))
+                    if list(reordered.keys()) != keys:
+                        need_reorder = True
+                except Exception:
+                    # If we can't inspect order, be conservative and rewrite
+                    need_reorder = True
+
+                if modified or need_reorder:
                     write_cast_file(md_path, front_matter, body, reorder=True)
-                    logger.info(f"Fixed cast fields in {md_path}")
+                    logger.info(f"Fixed cast fields/order in {md_path}")
 
             if not front_matter or "cast-id" not in front_matter:
                 continue

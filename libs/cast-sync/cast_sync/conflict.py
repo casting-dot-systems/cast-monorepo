@@ -4,15 +4,16 @@ import shutil
 import re
 import difflib
 from enum import Enum
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from ruamel.yaml import YAML
+from cast_core.yamlio import reorder_cast_fields
 
 
 class ConflictResolution(Enum):
@@ -97,16 +98,44 @@ def handle_conflict(
         if not m:
             return None, text
         yaml_text = m.group(1)
-        body = text[m.end():]
+        body = text[m.end() :]
         return yaml_text, body
+
+    _yaml = YAML()
+    _yaml.preserve_quotes = True
+    _yaml.default_flow_style = False
+    _yaml.width = 4096
+
+    def _canonicalize_yaml_for_diff(yaml_text: str) -> str:
+        """
+        For display: parse YAML, reorder so that:
+          - 'last-updated' is first,
+          - cast-* fields are in canonical order,
+          - others follow.
+        This includes 'last-updated' (unlike digest).
+        """
+        try:
+            data = _yaml.load(yaml_text) or {}
+            if not isinstance(data, dict):
+                return yaml_text
+            data = reorder_cast_fields(dict(data))
+            buf = StringIO()
+            _yaml.dump(data, buf)
+            return buf.getvalue().rstrip("\n")
+        except Exception:
+            # Fallback to original if parsing fails
+            return yaml_text
+
+    def _norm_lines(s: str) -> list[str]:
+        return (s or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
 
     def _render_side_by_side(a: str, b: str, title_left: str, title_right: str) -> Table:
         """
         Render a side-by-side, line-diffed table using Rich.
         """
-        a_lines = (a or "").splitlines()
-        b_lines = (b or "").splitlines()
-        sm = difflib.SequenceMatcher(a=a_lines, b=b_lines)
+        a_lines = _norm_lines(a)
+        b_lines = _norm_lines(b)
+        sm = difflib.SequenceMatcher(None, a_lines, b_lines, autojunk=False)
 
         table = Table.grid(expand=True)
         table.add_column(f"{title_left}", ratio=1)
@@ -122,12 +151,16 @@ def handle_conflict(
                 l = Text(left_txt)
                 r = Text(right_txt)
                 if tag == "equal":
-                    # Keep normal styling; could dim if desired:
-                    # l.stylize("dim"); r.stylize("dim")
-                    pass
+                    l.stylize("dim")
+                    r.stylize("dim")
                 elif tag == "replace":
-                    l.stylize("bold red")
-                    r.stylize("bold green")
+                    if left_txt == right_txt:
+                        # Even inside a replace block, identical lines should be neutral.
+                        l.stylize("dim")
+                        r.stylize("dim")
+                    else:
+                        l.stylize("bold red")
+                        r.stylize("bold green")
                 elif tag == "delete":
                     l.stylize("bold red")
                 elif tag == "insert":
@@ -136,24 +169,51 @@ def handle_conflict(
         return table
 
     if interactive:
+        # Load local cast-name for clarity in legend
+        def _local_cast_name(root: Path) -> str:
+            try:
+                cfg = root / ".cast" / "config.yaml"
+                if not cfg.exists():
+                    return "LOCAL"
+                data = _yaml.load(cfg.read_text(encoding="utf-8")) or {}
+                return data.get("cast-name", "LOCAL")
+            except Exception:
+                return "LOCAL"
+
+        cast_name = _local_cast_name(cast_root)
         console.rule("[bold red]Conflict detected[/bold red]")
+
+        # Legend panel
+        legend = Table.grid(padding=(0, 2))
+        legend.add_column(justify="left")
+        legend.add_column(justify="left")
+        legend.add_row(
+            f"[bold]Left:[/bold] LOCAL ([cyan]{cast_name}[/cyan])",
+            f"[bold]Right:[/bold] PEER [[magenta]{peer_name}[/magenta]]",
+        )
+        legend.add_row("[red]Red[/red]: change/delete in LOCAL", "[green]Green[/green]: add/change in PEER")
+        console.print(Panel(legend, title="Diff legend", expand=True))
+
         # Split both sides into (yaml, body)
         local_yaml, local_body = _split_front_matter(local_preview or "")
         peer_yaml, peer_body = _split_front_matter(peer_preview or "")
 
         # YAML diff (empty string if missing)
-        yaml_left = local_yaml if local_yaml is not None else ""
-        yaml_right = peer_yaml if peer_yaml is not None else ""
+        yaml_left = _canonicalize_yaml_for_diff(local_yaml) if local_yaml is not None else ""
+        yaml_right = _canonicalize_yaml_for_diff(peer_yaml) if peer_yaml is not None else ""
         yaml_table = _render_side_by_side(
-            yaml_left, yaml_right, "LOCAL (YAML)", f"PEER[{peer_name}] (YAML)"
+            yaml_left, yaml_right, f"LOCAL ({cast_name}) · YAML", f"PEER[{peer_name}] · YAML"
         )
-        console.print(Panel(yaml_table, title="YAML front matter (side-by-side diff)", expand=True))
+        console.print(Panel(yaml_table, title="YAML front matter (side‑by‑side diff)", expand=True))
 
         # Body diff
         body_table = _render_side_by_side(
-            local_body or "", peer_body or "", "LOCAL (body)", f"PEER[{peer_name}] (body)"
+            (local_body or ""),
+            (peer_body or ""),
+            f"LOCAL ({cast_name}) · body",
+            f"PEER[{peer_name}] · body",
         )
-        console.print(Panel(body_table, title="Markdown body (side-by-side diff)", expand=True))
+        console.print(Panel(body_table, title="Markdown body (side‑by‑side diff)", expand=True))
 
     if not interactive:
         # Non-interactive: keep local
