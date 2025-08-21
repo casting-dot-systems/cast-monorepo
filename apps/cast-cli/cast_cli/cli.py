@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 
@@ -34,6 +35,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def _sanitize_name(name: str) -> str:
+    """
+    Lightly sanitize a cast name for file-system friendliness and consistency:
+      - trim whitespace
+      - replace path separators with hyphens
+    """
+    name = (name or "").strip()
+    return name.replace("/", "-").replace("\\", "-")
+
 
 def get_current_root() -> Path:
     """Find the Cast root by looking for .cast/ directory."""
@@ -53,14 +63,41 @@ def get_current_root() -> Path:
 
 
 @app.command()
-def install(path: str = typer.Argument(".", help="Path to an existing Cast root")):
-    """Install/register a Cast in the machine registry (under ~/.cast/registry.json)."""
+def install(
+    path: str = typer.Argument(".", help="Path to an existing Cast root"),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Override the cast name before registering (updates .cast/config.yaml).",
+    ),
+):
+    """
+    Install/register a Cast in the machine registry (under ~/.cast/registry.json).
+
+    Notes:
+      • Enforces unique names and roots in the registry (replaces any duplicates).
+      • If --name is provided, .cast/config.yaml is updated prior to registration.
+    """
     root = Path(path).expanduser().resolve()
     try:
+        # Optionally rename the cast prior to registration
+        if name:
+            config_path = root / ".cast" / "config.yaml"
+            if not config_path.exists():
+                console.print("[red]Install failed:[/red] .cast/config.yaml not found in the target root")
+                raise typer.Exit(2)
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.load(f) or {}
+            cfg["cast-name"] = _sanitize_name(name)
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(cfg, f)
+
         entry = register_cast(root)
         console.print(
-            f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold] "
-            f"(id={entry.cast_id})\n  root: {entry.root}\n  vault: {entry.vault_path}"
+            f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n"
+            f"  root: {entry.root}\n"
+            f"  vault: {entry.vault_path}"
         )
     except Exception as e:
         console.print(f"[red]Install failed:[/red] {e}")
@@ -68,7 +105,10 @@ def install(path: str = typer.Argument(".", help="Path to an existing Cast root"
 
 
 @app.command("list")
-def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON")):
+def list_cmd(
+    json_out: bool = typer.Option(False, "--json", help="Output as JSON"),
+    show_ids: bool = typer.Option(False, "--ids", help="Include cast IDs in table output"),
+):
     """List casts installed in the machine registry."""
     try:
         entries = list_casts()
@@ -79,6 +119,7 @@ def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON
                         "cast_id": e.cast_id,
                         "name": e.name,
                         "root": str(e.root),
+                        "vault": str(e.vault_path),
                     }
                     for e in entries
                 ]
@@ -91,10 +132,16 @@ def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON
             else:
                 table = Table(show_header=True, header_style="bold")
                 table.add_column("Name")
-                table.add_column("ID")
+                if show_ids:
+                    table.add_column("ID")
                 table.add_column("Root")
+                table.add_column("Vault")
                 for e in entries:
-                    table.add_row(e.name, e.cast_id, str(e.root))
+                    row = [e.name]
+                    if show_ids:
+                        row.append(e.cast_id)
+                    row.extend([str(e.root), str(e.vault_path)])
+                    table.add_row(*row)
                 console.print(table)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -105,6 +152,9 @@ def list_cmd(json_out: bool = typer.Option(False, "--json", help="Output as JSON
 def init(
     name: str | None = typer.Option(None, "--name", help="Name for this Cast"),
     location: str = typer.Option("01 Vault", "--location", help="Vault location relative to root"),
+    install_after: bool = typer.Option(
+        True, "--install/--no-install", help="Also register in machine registry (default: install)"
+    ),
 ):
     """Initialize a new Cast in the current directory."""
     root = Path.cwd()
@@ -118,6 +168,7 @@ def init(
     if not name:
         name = Prompt.ask("Enter a name for this Cast")
 
+    name = _sanitize_name(name)
     # Create directories
     cast_dir.mkdir(parents=True)
     vault_dir = root / location
@@ -142,6 +193,14 @@ def init(
     console.print(f"[green][OK] Cast initialized: {name}[/green]")
     console.print(f"  Root: {root}")
     console.print(f"  Vault: {vault_dir}")
+
+    # Optional: auto-install/register to machine registry
+    if install_after:
+        try:
+            entry = register_cast(root)
+            console.print(f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n  root: {entry.root}\n  vault: {entry.vault_path}")
+        except Exception as e:
+            console.print(f"[red]Note:[/red] init succeeded, but auto-install failed: {e}")
 
 
 # NOTE: 'setup' and 'add_vault' were removed. Peer discovery is registry-only.

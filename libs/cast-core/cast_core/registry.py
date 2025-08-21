@@ -92,12 +92,37 @@ def _read_cast_config(root: Path) -> tuple[str, str, str]:
 
 
 def register_cast(root: Path) -> CastEntry:
-    """Register/update a Cast root in the machine registry."""
+    """
+    Register/update a Cast root in the machine registry.
+
+    Invariants enforced:
+      • Exactly one entry per cast-id (keyed as before).
+      • Exactly one entry per name (new): any other entry that uses the same name is removed.
+      • Exactly one entry per root path (new): any other entry that uses the same root is removed.
+    """
     root = root.expanduser().resolve()
     cast_id, name, vault_location = _read_cast_config(root)
 
     reg = load_registry()
     reg.setdefault("casts", {})
+    
+    # Enforce uniqueness by NAME and by ROOT across the registry.
+    root_str = str(root)
+    to_remove: list[str] = []
+    for cid, data in list(reg.get("casts", {}).items()):
+        if cid == cast_id:
+            # We'll overwrite our own key below; skip here.
+            continue
+        same_name = data.get("name") == name
+        same_root = data.get("root") == root_str
+        if same_name or same_root:
+            to_remove.append(cid)
+
+    if to_remove:
+        for cid in to_remove:
+            reg["casts"].pop(cid, None)
+
+    # Upsert our entry by id (canonical)
     reg["casts"][cast_id] = {
         "name": name,
         "root": str(root),
