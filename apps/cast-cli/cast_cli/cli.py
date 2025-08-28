@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
+from typing import Iterable
 
 import typer
 from cast_core import (
@@ -255,6 +256,9 @@ def hsync(
     cascade: bool = typer.Option(
         True, "--cascade/--no-cascade", help="Also run hsync for peers (and peers of peers)"
     ),
+    debug: bool = typer.Option(
+        False, "--debug", help="Show a detailed, legible execution plan (includes NO_OP)"
+    ),
 ):
     """Run horizontal sync across local vaults."""
     try:
@@ -283,6 +287,7 @@ def hsync(
                     dry_run=dry_run,
                     non_interactive=non_interactive,
                     cascade=cascade,
+                    debug=debug,
                 )
         except RuntimeError as e:
             console.print(f"[red]Unable to start sync:[/red] {e}")
@@ -296,6 +301,93 @@ def hsync(
             console.print("[yellow][WARN] Sync completed with conflicts[/yellow]")
         else:
             console.print("[red][ERROR] Sync failed[/red]")
+
+        # Render debug plan (if requested)
+        if debug and getattr(syncer, "last_plans", None) is not None:
+            plans = syncer.last_plans
+            if plans:
+                console.rule("[dim]Execution Plan (debug)")
+                t = Table(show_header=True, header_style="bold")
+                t.add_column("Decision", style="dim")
+                t.add_column("Peer")
+                t.add_column("File (local)")
+                t.add_column("Details")
+                for p in plans:
+                    # local file (relative)
+                    try:
+                        local_rel = str(p.local_path.relative_to(syncer.vault_path))
+                    except Exception:
+                        local_rel = p.local_path.name
+                    details = ""
+                    if p.decision.name.lower().startswith("rename"):
+                        # show before/after
+                        if p.decision.value == "rename_peer" and p.peer_path and p.rename_to:
+                            try:
+                                entry = resolve_cast_by_name(p.peer_name)
+                            except Exception:
+                                entry = None
+                            base = (p.peer_root / entry.vault_location) if (entry and p.peer_root) else None
+                            _from = str(p.peer_path.relative_to(base)) if (base and p.peer_path) else (p.peer_path.name if p.peer_path else "")
+                            _to = str(p.rename_to.relative_to(base)) if (base and p.rename_to) else (p.rename_to.name if p.rename_to else "")
+                            details = f"peer: {_from} → {_to}"
+                        elif p.decision.value == "rename_local" and p.rename_to:
+                            try:
+                                _from = str(p.local_path.relative_to(syncer.vault_path))
+                                _to = str(p.rename_to.relative_to(syncer.vault_path))
+                            except Exception:
+                                _from, _to = p.local_path.name, p.rename_to.name
+                            details = f"local: {_from} → {_to}"
+                    elif p.decision.value in ("pull", "create_local"):
+                        details = "peer → local"
+                    elif p.decision.value in ("push", "create_peer"):
+                        details = "local → peer"
+                    elif p.decision.value == "delete_local":
+                        details = "deleted locally (accept peer deletion)"
+                    elif p.decision.value == "delete_peer":
+                        details = "deleted on peer (propagate local deletion)"
+                    elif p.decision.value == "conflict":
+                        details = "conflict (see resolution)"
+                    t.add_row(p.decision.value, p.peer_name, local_rel, details)
+                console.print(t)
+
+        # Render human-friendly summary
+        summary = getattr(syncer, "summary", None)
+        if summary:
+            console.rule("[bold]Sync Summary[/bold]")
+            # Aggregate counts for a compact totals line
+            c = summary.counts
+            pulls = c.get("pull", 0)
+            pushes = c.get("push", 0)
+            created = c.get("create_peer", 0) + c.get("create_local", 0)
+            deletes = c.get("delete_local", 0) + c.get("delete_peer", 0)
+            renames = c.get("rename_local", 0) + c.get("rename_peer", 0)
+            conflicts_open = summary.conflicts_open
+            conflicts_resolved = summary.conflicts_resolved
+            console.print(
+                f"Totals: ⬇️ pulls: [bold]{pulls}[/bold]   ⬆️ pushes: [bold]{pushes}[/bold]   "
+                f"➕ created: [bold]{created}[/bold]   ✂️ deletions: [bold]{deletes}[/bold]\n"
+                f"        🔁 renames: [bold]{renames}[/bold]   "
+                f"⚠️ conflicts (open): [bold]{conflicts_open}[/bold]   "
+                f"✔️ conflicts (resolved): [bold]{conflicts_resolved}[/bold]"
+            )
+
+            if summary.items:
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Action")
+                table.add_column("Peer")
+                table.add_column("File")
+                table.add_column("Details")
+                for it in summary.items:
+                    # Only list actual changes and conflicts; omit pure NO_OPs
+                    action = it.action
+                    if action == "no_op":
+                        continue
+                    file_display = it.local_rel or "-"
+                    details = it.detail or ""
+                    table.add_row(action, it.peer, file_display, details)
+                console.print(table)
+            else:
+                console.print("[dim]No changes.[/dim]")
 
         if exit_code != 0:
             raise typer.Exit(exit_code)
