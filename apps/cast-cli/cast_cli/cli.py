@@ -27,9 +27,9 @@ yaml = YAML()
 yaml.preserve_quotes = True
 yaml.default_flow_style = False
 
-# Configure logging
+# Configure logging (default to WARNING, can be lowered to INFO in debug mode)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M",
 )
@@ -261,6 +261,14 @@ def hsync(
     ),
 ):
     """Run horizontal sync across local vaults."""
+    # Adjust logging level based on debug flag
+    if debug:
+        logging.getLogger().setLevel(logging.INFO)
+        logging.getLogger('cast_sync').setLevel(logging.INFO)
+    else:
+        logging.getLogger().setLevel(logging.WARNING)
+        logging.getLogger('cast_sync').setLevel(logging.WARNING)
+    
     try:
         root = get_current_root()
         # (Note) registry-backed discovery happens inside HorizontalSync
