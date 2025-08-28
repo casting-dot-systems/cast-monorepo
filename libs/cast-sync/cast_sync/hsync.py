@@ -51,6 +51,28 @@ class SyncPlan:
     rename_to: Path | None = None
 
 
+@dataclass
+class SummaryItem:
+    """One executed (or planned) change suitable for user summaries."""
+    action: str                  # e.g. 'pull', 'push', 'create_peer', 'delete_local', 'rename_peer', 'conflict', ...
+    cast_id: str
+    peer: str
+    local_rel: str               # path relative to local vault (best-effort for deletions)
+    peer_rel: str | None = None  # path relative to peer vault (if known)
+    detail: str | None = None    # human text like "peer → local", or "Projects/TODO.md → Notes/TODO.md"
+
+
+@dataclass
+class SyncSummary:
+    """Aggregated summary of a sync run."""
+    started: str
+    finished: str
+    counts: dict[str, int]
+    items: list[SummaryItem]
+    conflicts_open: int          # unresolved conflicts (skipped)
+    conflicts_resolved: int      # resolved by KEEP_LOCAL/KEEP_PEER
+
+
 class HorizontalSync:
     """Horizontal sync coordinator."""
 
@@ -65,6 +87,9 @@ class HorizontalSync:
         # Vault path
         self.vault_path = root_path / self.config.cast_location
         self._registry = load_registry()
+        # Exposed artifacts for the CLI
+        self.summary: SyncSummary | None = None
+        self.last_plans: list[SyncPlan] = []
 
     def _load_config(self) -> CastConfig:
         """Load cast config."""
@@ -397,6 +422,15 @@ class HorizontalSync:
         non_interactive: bool = False,
     ) -> int:
         """Internal core logic (single-root, no cascade)."""
+        # Initialize summary
+        self.summary = SyncSummary(
+            started=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            finished="",
+            counts={},
+            items=[],
+            conflicts_open=0,
+            conflicts_resolved=0,
+        )
         # Build local index
         logger.info(f"Indexing local vault: {self.vault_path}")
         local_index = build_ephemeral_index(
@@ -489,6 +523,9 @@ class HorizontalSync:
                     rename_to=rename_to,
                 )
                 plans.append(plan)
+
+        # Stash the plan for debug rendering by the CLI
+        self.last_plans = plans[:]
 
         # Deletion pass: local file missing but baseline exists → decide per peer
         # IMPORTANT: when file_filter is set, we must NOT treat non-scanned files as deleted.
@@ -592,6 +629,66 @@ class HorizontalSync:
                         )
                         line += f"  {src.name} → {plan.rename_to.name}"
                     print(line)
+            # Populate summary counts/items for the CLI even in dry-run
+            for plan in plans:
+                if plan.decision == SyncDecision.NO_OP:
+                    continue
+                action = plan.decision.value
+                self.summary.counts[action] = self.summary.counts.get(action, 0) + 1
+                # best-effort relpaths
+                local_rel = ""
+                try:
+                    local_rel = str(plan.local_path.relative_to(self.vault_path))
+                except Exception:
+                    local_rel = plan.local_path.name
+                peer_rel = None
+                if plan.peer_path:
+                    try:
+                        entry = resolve_cast_by_name(plan.peer_name)
+                        base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                        peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
+                    except Exception:
+                        peer_rel = plan.peer_path.name
+                detail = None
+                if plan.decision in (SyncDecision.PULL, SyncDecision.CREATE_LOCAL):
+                    detail = "peer → local"
+                elif plan.decision in (SyncDecision.PUSH, SyncDecision.CREATE_PEER):
+                    detail = "local → peer"
+                elif plan.decision in (SyncDecision.DELETE_LOCAL,):
+                    detail = "deleted locally (accept peer deletion)"
+                elif plan.decision in (SyncDecision.DELETE_PEER,):
+                    detail = "deleted on peer (propagate local deletion)"
+                elif plan.decision == SyncDecision.RENAME_PEER and plan.rename_to and plan.peer_path:
+                    try:
+                        entry = resolve_cast_by_name(plan.peer_name)
+                        base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                        _from = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
+                        _to = str(plan.rename_to.relative_to(base)) if base else plan.rename_to.name
+                        detail = f"peer: {_from} → {_to}"
+                    except Exception:
+                        detail = f"peer: {plan.peer_path.name} → {plan.rename_to.name}"
+                elif plan.decision == SyncDecision.RENAME_LOCAL and plan.rename_to:
+                    try:
+                        _from = str(plan.local_path.relative_to(self.vault_path))
+                        _to = str(plan.rename_to.relative_to(self.vault_path))
+                        detail = f"local: {_from} → {_to}"
+                    except Exception:
+                        detail = f"local: {plan.local_path.name} → {plan.rename_to.name}"
+                elif plan.decision == SyncDecision.CONFLICT:
+                    detail = "conflict (resolution pending)"
+                    # Count as open conflict in dry-run
+                    self.summary.conflicts_open += 1
+                self.summary.items.append(
+                    SummaryItem(
+                        action=action,
+                        cast_id=plan.cast_id,
+                        peer=plan.peer_name,
+                        local_rel=local_rel,
+                        peer_rel=peer_rel,
+                        detail=detail,
+                    )
+                )
+            self.summary.finished = datetime.now().strftime("%Y-%m-%d %H:%M")
             return 0
 
         # Execute plan
@@ -621,6 +718,23 @@ class HorizontalSync:
                         self._update_baseline_both(
                             plan.cast_id, plan.peer_name, plan.peer_digest or "", plan.peer_root
                         )
+                    # summary
+                    try:
+                        local_rel = str(plan.local_path.relative_to(self.vault_path))
+                    except Exception:
+                        local_rel = plan.local_path.name
+                    peer_rel = None
+                    if plan.peer_path:
+                        try:
+                            entry = resolve_cast_by_name(plan.peer_name)
+                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
+                        except Exception:
+                            peer_rel = plan.peer_path.name
+                    self.summary.counts["pull"] = self.summary.counts.get("pull", 0) + 1
+                    self.summary.items.append(
+                        SummaryItem("pull", plan.cast_id, plan.peer_name, local_rel, peer_rel, "peer → local")
+                    )
 
                 elif plan.decision in (SyncDecision.PUSH, SyncDecision.CREATE_PEER):
                     # Copy local to peer
@@ -631,6 +745,23 @@ class HorizontalSync:
                         self._update_baseline_both(
                             plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
                         )
+                    try:
+                        local_rel = str(plan.local_path.relative_to(self.vault_path))
+                    except Exception:
+                        local_rel = plan.local_path.name
+                    peer_rel = None
+                    if plan.peer_path:
+                        try:
+                            entry = resolve_cast_by_name(plan.peer_name)
+                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
+                        except Exception:
+                            peer_rel = plan.peer_path.name
+                    key = "create_peer" if plan.decision == SyncDecision.CREATE_PEER else "push"
+                    self.summary.counts[key] = self.summary.counts.get(key, 0) + 1
+                    self.summary.items.append(
+                        SummaryItem(key, plan.cast_id, plan.peer_name, local_rel, peer_rel, "local → peer")
+                    )
 
                 elif plan.decision == SyncDecision.DELETE_LOCAL:
                     # Accept peer deletion: remove local and clear baselines both sides
@@ -641,6 +772,15 @@ class HorizontalSync:
                         cast_id=plan.cast_id,
                         path=str(plan.local_path.relative_to(self.vault_path)),
                         peer=plan.peer_name,
+                    )
+                    try:
+                        local_rel = str(plan.local_path.relative_to(self.vault_path))
+                    except Exception:
+                        local_rel = plan.local_path.name
+                    self.summary.counts["delete_local"] = self.summary.counts.get("delete_local", 0) + 1
+                    self.summary.items.append(
+                        SummaryItem("delete_local", plan.cast_id, plan.peer_name, local_rel, None,
+                                    "deleted locally (accept peer deletion)")
                     )
 
                 elif plan.decision == SyncDecision.DELETE_PEER:
@@ -667,6 +807,15 @@ class HorizontalSync:
                             path_str = plan.peer_path.name
                     self._log_event(
                         "delete_peer", cast_id=plan.cast_id, path=path_str, peer=plan.peer_name
+                    )
+                    try:
+                        local_rel = str(plan.local_path.relative_to(self.vault_path))
+                    except Exception:
+                        local_rel = plan.local_path.name
+                    self.summary.counts["delete_peer"] = self.summary.counts.get("delete_peer", 0) + 1
+                    self.summary.items.append(
+                        SummaryItem("delete_peer", plan.cast_id, plan.peer_name, local_rel, path_str or "", 
+                                    "deleted on peer (propagate local deletion)")
                     )
 
                 elif plan.decision == SyncDecision.RENAME_PEER:
@@ -696,6 +845,15 @@ class HorizontalSync:
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
                         )
+                        # summary
+                        try:
+                            local_rel = str(plan.local_path.relative_to(self.vault_path))
+                        except Exception:
+                            local_rel = plan.local_path.name
+                        self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
+                        self.summary.items.append(
+                            SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel, _to, f"peer: {_from} → {_to}")
+                        )
 
                 elif plan.decision == SyncDecision.RENAME_LOCAL:
                     if plan.rename_to:
@@ -719,6 +877,10 @@ class HorizontalSync:
                             plan.peer_name,
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
+                        )
+                        self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
+                        self.summary.items.append(
+                            SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}")
                         )
 
                 elif plan.decision == SyncDecision.CONFLICT:
@@ -751,6 +913,15 @@ class HorizontalSync:
                             if plan.peer_path:
                                 plan.peer_path.unlink(missing_ok=True)
                             self._clear_baseline_both(plan.cast_id, plan.peer_name, plan.peer_root)
+                        try:
+                            local_rel = str(plan.local_path.relative_to(self.vault_path))
+                        except Exception:
+                            local_rel = plan.local_path.name
+                        self.summary.counts["conflict_keep_local"] = self.summary.counts.get("conflict_keep_local", 0) + 1
+                        self.summary.conflicts_resolved += 1
+                        self.summary.items.append(
+                            SummaryItem("conflict", plan.cast_id, plan.peer_name, local_rel, None, "resolved: KEEP_LOCAL")
+                        )
                     elif resolution == ConflictResolution.KEEP_PEER:
                         if plan.peer_path:
                             self._safe_copy(
@@ -762,9 +933,26 @@ class HorizontalSync:
                                 plan.peer_digest or "",
                                 plan.peer_root,
                             )
+                        try:
+                            local_rel = str(plan.local_path.relative_to(self.vault_path))
+                        except Exception:
+                            local_rel = plan.local_path.name
+                        self.summary.counts["conflict_keep_peer"] = self.summary.counts.get("conflict_keep_peer", 0) + 1
+                        self.summary.conflicts_resolved += 1
+                        self.summary.items.append(
+                            SummaryItem("conflict", plan.cast_id, plan.peer_name, local_rel, None, "resolved: KEEP_PEER")
+                        )
                     else:
                         # Skip - baseline not updated
                         conflicts.append(plan)
+                        try:
+                            local_rel = str(plan.local_path.relative_to(self.vault_path))
+                        except Exception:
+                            local_rel = plan.local_path.name
+                        self.summary.conflicts_open += 1
+                        self.summary.items.append(
+                            SummaryItem("conflict", plan.cast_id, plan.peer_name, local_rel, None, "skipped (unresolved)")
+                        )
 
             except Exception as e:
                 logger.error(f"Error syncing {plan.local_path.name}: {e}")
@@ -776,6 +964,8 @@ class HorizontalSync:
         # Set exit code
         if conflicts:
             exit_code = 3
+        if self.summary:
+            self.summary.finished = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         return exit_code
 
@@ -795,6 +985,7 @@ class HorizontalSync:
         dry_run: bool = False,
         non_interactive: bool = False,
         cascade: bool = True,
+        debug: bool = False,
         visited_roots: set[Path] | None = None,
     ) -> int:
         """Run horizontal sync (optionally cascading to peers-of-peers)."""
@@ -829,6 +1020,7 @@ class HorizontalSync:
                     dry_run,
                     non_interactive,
                     cascade=True,
+                    debug=debug,
                     visited_roots=visited_roots,
                 )
                 code = max(code, code2)
