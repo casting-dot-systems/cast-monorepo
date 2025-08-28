@@ -385,11 +385,12 @@ def doctor():
         if not issues and not warnings:
             console.print("[green][OK] Cast configuration looks good![/green]")
 
-        return 0 if not issues else 1
+        # Use proper process exit codes for CLI consumers
+        raise typer.Exit(0 if not issues else 1)
 
     except Exception as e:
         console.print(f"[red]Error during check: {e}[/red]")
-        return 2
+        raise typer.Exit(2) from e
 
 
 @app.command()
@@ -433,7 +434,7 @@ def report():
             )
 
         # Output as JSON
-        console.print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")

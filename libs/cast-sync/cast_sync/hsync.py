@@ -184,6 +184,22 @@ class HorizontalSync:
             pass
         return None
 
+    def _normalize_rel_for_lookup(self, path_or_id: str) -> str:
+        """
+        Convert a user-provided --file value into a vault-relative path
+        suitable for EphemeralIndex.get_by_path(), if it looks like a path.
+        Otherwise return the string unchanged (cast-id case).
+        """
+        p = Path(path_or_id)
+        if p.is_absolute():
+            try:
+                return str(p.relative_to(self.vault_path))
+            except ValueError:
+                return str(p)
+        if p.parts and p.parts[0] == self.vault_path.name:
+            return str(Path(*p.parts[1:]))
+        return str(p)
+
     def _safe_dest(self, base: Path, suffix: str) -> Path:
         """Return a non-existing path by appending a suffix (and counter if needed)."""
         if not base.exists():
@@ -485,7 +501,8 @@ class HorizontalSync:
                 allowed_ids.add(file_filter)
             else:
                 # If filter was a relpath we scanned (and exists), map to its cast-id
-                rec = local_index.get_by_path(file_filter)
+                normalized_rel = self._normalize_rel_for_lookup(file_filter)
+                rec = local_index.get_by_path(normalized_rel)
                 if rec:
                     allowed_ids.add(rec["cast_id"])
                 else:
@@ -503,7 +520,7 @@ class HorizontalSync:
                             continue
                         peer_indices[pname] = pair
                         _, pidx = pair
-                        prec = pidx.get_by_path(file_filter)
+                        prec = pidx.get_by_path(normalized_rel)
                         if prec:
                             allowed_ids.add(prec["cast_id"])
 

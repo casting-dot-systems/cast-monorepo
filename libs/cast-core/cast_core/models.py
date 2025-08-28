@@ -2,11 +2,14 @@
 
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class CastConfig(BaseModel):
     """Configuration for a Cast (in .cast/config.yaml)."""
+
+    # Accept both alias keys (e.g., "cast-name") and field names ("cast_name")
+    model_config = ConfigDict(populate_by_name=True)
 
     cast_version: int = Field(default=1, alias="cast-version")
     cast_id: str = Field(description="UUID4 for this Cast/Root", alias="cast-id")
@@ -32,6 +35,9 @@ class InstalledCodebase(BaseModel):
 
 class LocalConfig(BaseModel):
     """Machine-specific config (in .cast/local.yaml)."""
+
+    # Same behavior: allow population by either alias or field name.
+    model_config = ConfigDict(populate_by_name=True)
 
     path_to_root: str = Field(description="Absolute path to Root", alias="path-to-root")
     installed_vaults: list[InstalledVault] = Field(default_factory=list, alias="installed-vaults")
