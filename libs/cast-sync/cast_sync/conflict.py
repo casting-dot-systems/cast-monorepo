@@ -233,20 +233,40 @@ def handle_conflict(
                     left_styled = Text(left_txt, style="dim")
                     right_styled = Text(right_txt, style="dim")
                 elif tag == "delete":
-                    left_styled = Text(left_txt, style="bold red")
+                    # Line-level background highlight + text styling
+                    left_styled = Text(left_txt, style="bold red on rgb(64,32,32)")
                     right_styled = Text(right_txt, style="dim")
                 elif tag == "insert":
+                    # Line-level background highlight + text styling
                     left_styled = Text(left_txt, style="dim")
-                    right_styled = Text(right_txt, style="bold green")
+                    right_styled = Text(right_txt, style="bold green on rgb(32,64,32)")
                 elif tag == "replace":
                     if has_left and has_right:
-                        left_styled, right_styled = _intraline(left_txt, right_txt)
+                        # Get intraline highlights first
+                        left_intra, right_intra = _intraline(left_txt, right_txt)
+                        # Apply line-level background highlights
+                        left_styled = Text()
+                        right_styled = Text()
+                        for segment in left_intra:
+                            if segment.style and "red" in str(segment.style):
+                                # Keep character-level red, add line-level background
+                                left_styled.append(segment.plain, style="bold red on rgb(64,32,32)")
+                            else:
+                                # Apply line-level background to unchanged parts
+                                left_styled.append(segment.plain, style="on rgb(48,32,32)")
+                        for segment in right_intra:
+                            if segment.style and "green" in str(segment.style):
+                                # Keep character-level green, add line-level background
+                                right_styled.append(segment.plain, style="bold green on rgb(32,64,32)")
+                            else:
+                                # Apply line-level background to unchanged parts
+                                right_styled.append(segment.plain, style="on rgb(32,48,32)")
                     elif has_left:  # only left
-                        left_styled = Text(left_txt, style="bold red")
+                        left_styled = Text(left_txt, style="bold red on rgb(64,32,32)")
                         right_styled = Text("", style="dim")
                     else:  # only right
                         left_styled = Text("", style="dim")
-                        right_styled = Text(right_txt, style="bold green")
+                        right_styled = Text(right_txt, style="bold green on rgb(32,64,32)")
                 else:
                     left_styled = Text(left_txt)
                     right_styled = Text(right_txt)
@@ -289,6 +309,9 @@ def handle_conflict(
         )
         legend.add_row(
             "[red]Red[/red]: change/delete in LOCAL", "[green]Green[/green]: add/change in PEER"
+        )
+        legend.add_row(
+            "[dim]Lines with changes have background highlights[/dim]", "[dim]Character changes are emphasized within lines[/dim]"
         )
         console.print(Panel(legend, title="Diff legend", expand=True))
 
