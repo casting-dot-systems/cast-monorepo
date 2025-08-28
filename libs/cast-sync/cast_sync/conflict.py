@@ -1,6 +1,7 @@
 """Conflict resolution for Cast Sync."""
 
 import difflib
+import os
 import re
 import shutil
 from enum import Enum
@@ -8,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 from cast_core.yamlio import reorder_cast_fields
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -88,6 +90,13 @@ def handle_conflict(
     except Exception:
         local_preview, peer_preview = "", ""
 
+    # Number of context lines to show around diffs (fold the rest).
+    # Can be adjusted per-run via environment variable.
+    try:
+        ctx = max(0, int(os.environ.get("CAST_DIFF_CONTEXT", "3")))
+    except ValueError:
+        ctx = 3
+
     def _split_front_matter(text: str) -> tuple[str | None, str]:
         """
         Split markdown into (yaml_text, body) if front matter exists; else (None, text).
@@ -128,43 +137,131 @@ def handle_conflict(
     def _norm_lines(s: str) -> list[str]:
         return (s or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
 
-    def _render_side_by_side(a: str, b: str, title_left: str, title_right: str) -> Table:
+    def _intraline(left: str, right: str) -> tuple[Text, Text]:
         """
-        Render a side-by-side, line-diffed table using Rich.
+        Produce Text objects with fine-grained highlights for a replace block.
+        Deletions in LEFT are red; insertions in RIGHT are green.
+        """
+        sm = difflib.SequenceMatcher(None, left, right, autojunk=False)
+        left_text = Text()
+        right_text = Text()
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            lseg = left[i1:i2]
+            rseg = right[j1:j2]
+            if tag == "equal":
+                left_text.append(lseg)
+                right_text.append(rseg)
+            elif tag == "delete":
+                left_text.append(lseg, style="bold red")
+            elif tag == "insert":
+                right_text.append(rseg, style="bold green")
+            elif tag == "replace":
+                left_text.append(lseg, style="bold red")
+                right_text.append(rseg, style="bold green")
+        return left_text, right_text
+
+    def _ln_cell(ln: int | None) -> Text:
+        """Format a line-number prefix."""
+        s = f"{ln:>4}" if ln is not None else "    "
+        return Text(s + " │ ", style="dim")
+
+    def _fold_row(n: int) -> tuple[Text, Text]:
+        msg = Text(f"… {n} lines unchanged …", style="dim italic")
+        return msg, msg
+
+    def _render_side_by_side(a: str, b: str, title_left: str, title_right: str, context: int) -> Table:
+        """
+        Render a side-by-side, line-diffed table using Rich.Table with headers,
+        line numbers, intraline highlights, and context folding.
         """
         a_lines = _norm_lines(a)
         b_lines = _norm_lines(b)
         sm = difflib.SequenceMatcher(None, a_lines, b_lines, autojunk=False)
 
-        table = Table.grid(expand=True)
-        table.add_column(f"{title_left}", ratio=1)
-        table.add_column(f"{title_right}", ratio=1)
+        table = Table(
+            expand=True,
+            show_edge=False,
+            box=box.SIMPLE_HEAD,
+            pad_edge=False,
+        )
+        table.add_column(title_left, ratio=1, overflow="fold", no_wrap=False, min_width=10)
+        table.add_column(title_right, ratio=1, overflow="fold", no_wrap=False, min_width=10)
+
+        ln_a = 1
+        ln_b = 1
 
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            # Max width approach: iterate longest span
-            span = max(i2 - i1, j2 - j1)
-            for k in range(span):
-                left_txt = a_lines[i1 + k] if (i1 + k) < i2 else ""
-                right_txt = b_lines[j1 + k] if (j1 + k) < j2 else ""
+            if tag == "equal" and context > 0:
+                block_len = i2 - i1  # equals on both sides
+                if block_len > 2 * context:
+                    # head
+                    for k in range(context):
+                        left_txt = a_lines[i1 + k]
+                        right_txt = b_lines[j1 + k]
+                        left = Text(left_txt, style="dim")
+                        right = Text(right_txt, style="dim")
+                        table.add_row(_ln_cell(ln_a) + left, _ln_cell(ln_b) + right)
+                        ln_a += 1
+                        ln_b += 1
+                    # folded middle
+                    folded = block_len - (2 * context)
+                    lmsg, rmsg = _fold_row(folded)
+                    table.add_row(_ln_cell(None) + lmsg, _ln_cell(None) + rmsg)
+                    # tail
+                    for k in range(block_len - context, block_len):
+                        left_txt = a_lines[i1 + k]
+                        right_txt = b_lines[j1 + k]
+                        left = Text(left_txt, style="dim")
+                        right = Text(right_txt, style="dim")
+                        table.add_row(_ln_cell(ln_a) + left, _ln_cell(ln_b) + right)
+                        ln_a += 1
+                        ln_b += 1
+                    continue  # done with this equal block
 
-                l = Text(left_txt)
-                r = Text(right_txt)
+            # Non-folded handling (including equal blocks when small)
+            span_a = i2 - i1
+            span_b = j2 - j1
+            span = max(span_a, span_b)
+            for k in range(span):
+                has_left = k < span_a
+                has_right = k < span_b
+                left_txt = a_lines[i1 + k] if has_left else ""
+                right_txt = b_lines[j1 + k] if has_right else ""
+
+                # Build left/right Text with styles
                 if tag == "equal":
-                    l.stylize("dim")
-                    r.stylize("dim")
-                elif tag == "replace":
-                    if left_txt == right_txt:
-                        # Even inside a replace block, identical lines should be neutral.
-                        l.stylize("dim")
-                        r.stylize("dim")
-                    else:
-                        l.stylize("bold red")
-                        r.stylize("bold green")
+                    left_styled = Text(left_txt, style="dim")
+                    right_styled = Text(right_txt, style="dim")
                 elif tag == "delete":
-                    l.stylize("bold red")
+                    left_styled = Text(left_txt, style="bold red")
+                    right_styled = Text(right_txt, style="dim")
                 elif tag == "insert":
-                    r.stylize("bold green")
-                table.add_row(l, r)
+                    left_styled = Text(left_txt, style="dim")
+                    right_styled = Text(right_txt, style="bold green")
+                elif tag == "replace":
+                    if has_left and has_right:
+                        left_styled, right_styled = _intraline(left_txt, right_txt)
+                    elif has_left:  # only left
+                        left_styled = Text(left_txt, style="bold red")
+                        right_styled = Text("", style="dim")
+                    else:  # only right
+                        left_styled = Text("", style="dim")
+                        right_styled = Text(right_txt, style="bold green")
+                else:
+                    left_styled = Text(left_txt)
+                    right_styled = Text(right_txt)
+
+                # Prefix with line numbers where applicable
+                cell_left = _ln_cell(ln_a if has_left else None) + left_styled
+                cell_right = _ln_cell(ln_b if has_right else None) + right_styled
+
+                table.add_row(cell_left, cell_right)
+
+                if has_left:
+                    ln_a += 1
+                if has_right:
+                    ln_b += 1
+
         return table
 
     if interactive:
@@ -203,7 +300,11 @@ def handle_conflict(
         yaml_left = _canonicalize_yaml_for_diff(local_yaml) if local_yaml is not None else ""
         yaml_right = _canonicalize_yaml_for_diff(peer_yaml) if peer_yaml is not None else ""
         yaml_table = _render_side_by_side(
-            yaml_left, yaml_right, f"LOCAL ({cast_name}) · YAML", f"PEER[{peer_name}] · YAML"
+            yaml_left,
+            yaml_right,
+            f"LOCAL ({cast_name}) · YAML",
+            f"PEER[{peer_name}] · YAML",
+            context=ctx,
         )
         console.print(Panel(yaml_table, title="YAML front matter (side‑by‑side diff)", expand=True))
 
@@ -213,6 +314,7 @@ def handle_conflict(
             (peer_body or ""),
             f"LOCAL ({cast_name}) · body",
             f"PEER[{peer_name}] · body",
+            context=ctx,
         )
         console.print(Panel(body_table, title="Markdown body (side‑by‑side diff)", expand=True))
 
