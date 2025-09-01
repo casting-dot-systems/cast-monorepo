@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cast-cli"
-version = "0.1.2"
+version = "0.1.3"
 description = "CLI for Cast Sync"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +12,11 @@ dependencies = [
     "cast-sync",
     "typer>=0.9.0",
     "rich>=13.0.0",
-    "ruamel.yaml>=0.18.0"
+    "ruamel.yaml>=0.18.0",
+    "google-api-python-client>=2.131.0",
+    "google-auth>=2.30.0",
+    "google-auth-oauthlib>=1.2.0",
+    "python-dotenv>=1.0.0"
 ]
 
 [tool.hatch.metadata]
@@ -29,3 +33,5 @@ cast = "cast_cli.cli:app"
 dev = [
     "pytest>=8.3.0"
 ]
+
+# Google Docs integration is now included by default

@@ -87,6 +87,9 @@ def ensure_cast_fields(
     """
     modified = False
 
+    if "last-updated" not in front_matter:
+        front_matter["last-updated"] = ""
+
     # Generate cast-id if missing
     if generate_id and "cast-id" not in front_matter:
         front_matter["cast-id"] = str(uuid.uuid4())

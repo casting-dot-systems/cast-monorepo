@@ -22,6 +22,7 @@ from ruamel.yaml import YAML
 
 # Initialize
 app = typer.Typer(help="Cast Sync - Synchronize Markdown files across local vaults")
+# Subcommands (e.g., gdoc) get added at bottom to avoid circular imports.
 console = Console()
 yaml = YAML()
 yaml.preserve_quotes = True
@@ -540,6 +541,14 @@ def report():
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(2) from e
 
+
+# Register optional subcommands last to avoid import cycles.
+# gdoc subcommands import heavy deps lazily; base CLI remains lightweight.
+try:
+    from cast_cli.gdoc import gdoc_app
+    app.add_typer(gdoc_app, name="gdoc")
+except Exception:
+    pass
 
 if __name__ == "__main__":
     app()
