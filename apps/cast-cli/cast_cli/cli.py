@@ -154,7 +154,7 @@ def list_cmd(
 @app.command()
 def init(
     name: str | None = typer.Option(None, "--name", help="Name for this Cast"),
-    location: str = typer.Option("01 Vault", "--location", help="Vault location relative to root"),
+    location: str = typer.Option("Cast", "--location", help="Vault location relative to root"),
     install_after: bool = typer.Option(
         True, "--install/--no-install", help="Also register in machine registry (default: install)"
     ),
@@ -278,7 +278,7 @@ def hsync(
         with open(config_path, encoding="utf-8") as f:
             config_data = yaml.load(f)
 
-        vault_path = root / config_data.get("cast-location", "01 Vault")
+        vault_path = root / config_data.get("cast-location", "Cast")
         if not vault_path.exists():
             console.print(f"[red]Error: Vault not found at {vault_path}[/red]")
             raise typer.Exit(2)
@@ -432,7 +432,7 @@ def doctor():
             if not config.get("cast-name"):
                 issues.append("cast-name missing in config.yaml")
 
-            vault_location = config.get("cast-location", "01 Vault")
+            vault_location = config.get("cast-location", "Cast")
             vault_path = root / vault_location
             if not vault_path.exists():
                 issues.append(f"Vault not found at {vault_location}")
@@ -458,7 +458,7 @@ def doctor():
         # Validate that referenced peers are resolvable via the machine registry
         try:
             if config_path.exists() and not issues:
-                vault_location = config.get("cast-location", "01 Vault")
+                vault_location = config.get("cast-location", "Cast")
                 vault_path = root / vault_location
                 if vault_path.exists():
                     idx = build_ephemeral_index(root, vault_path, fixup=False)
@@ -506,7 +506,7 @@ def report():
         with open(config_path, encoding="utf-8") as f:
             config = yaml.load(f)
 
-        vault_path = root / config.get("cast-location", "01 Vault")
+        vault_path = root / config.get("cast-location", "Cast")
 
         if not vault_path.exists():
             console.print(f"[red]Error: Vault not found at {vault_path}[/red]")

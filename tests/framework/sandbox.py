@@ -32,7 +32,7 @@ class VaultRef:
 
     name: str
     root: Path  # root that contains ".cast" and vault folder
-    vault_location: str  # e.g. "01 Vault"
+    vault_location: str  # e.g. "Cast"
 
     @property
     def vault(self) -> Path:
@@ -88,7 +88,7 @@ class Sandbox:
         return json.loads(res.stdout).get("casts", [])
 
     # --- Vault lifecycle ----------------------------------------------------
-    def create_vault(self, name: str, location: str = "01 Vault") -> VaultRef:
+    def create_vault(self, name: str, location: str = "Cast") -> VaultRef:
         root = self.base / name
         root.mkdir(parents=True, exist_ok=True)
         with cwd(root):

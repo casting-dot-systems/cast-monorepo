@@ -15,7 +15,7 @@ class CastConfig(BaseModel):
     cast_id: str = Field(description="UUID4 for this Cast/Root", alias="cast-id")
     cast_name: str = Field(description="Name of this vault", alias="cast-name")
     cast_location: str = Field(
-        default="01 Vault", description="Relative path to vault", alias="cast-location"
+        default="Cast", description="Relative path to vault", alias="cast-location"
     )
 
 

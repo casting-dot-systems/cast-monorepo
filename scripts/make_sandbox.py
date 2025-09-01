@@ -55,7 +55,7 @@ def build():
         run([sys.executable, "-m", "cast_cli", "install", "."], cwd=p, env=env)
 
     # Create note in A → peers B,C (live)
-    note_rel = Path("01 Vault") / "hello.md"
+    note_rel = Path("Cast") / "hello.md"
     text = "\n".join(
         [
             "---",

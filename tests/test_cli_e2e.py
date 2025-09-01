@@ -87,7 +87,7 @@ def test_full_flow_install_list_sync(env, tmp_path: Path):
     # create a note in vault1
     # pick a stable cast-id for determinism
     cid = "11111111-1111-1111-1111-111111111111"
-    note_rel = Path("01 Vault") / "note.md"
+    note_rel = Path("Cast") / "note.md"
     note1 = root1 / note_rel
     text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Note A", body="Hello")
     _write_file(note1, text)
@@ -144,7 +144,7 @@ def test_first_contact_identical_sets_baseline(env, tmp_path: Path):
         os.chdir(old_cwd)
 
     cid = "22222222-2222-2222-2222-222222222222"
-    rel = Path("01 Vault") / "same.md"
+    rel = Path("Cast") / "same.md"
     body = "Same content"
     text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Same", body=body)
     _write_file(root1 / rel, text)
@@ -183,7 +183,7 @@ def test_safe_push_rename_when_peer_has_different_cast_id(env, tmp_path: Path):
     finally:
         os.chdir(old_cwd)
 
-    rel = Path("01 Vault") / "conflict.md"
+    rel = Path("Cast") / "conflict.md"
 
     # local cast-id A
     cid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -207,7 +207,7 @@ def test_safe_push_rename_when_peer_has_different_cast_id(env, tmp_path: Path):
     # original peer file intact
     assert (root2 / rel).exists()
     # renamed copy exists
-    renamed = root2 / "01 Vault" / "conflict (~from vault1).md"
+    renamed = root2 / "Cast" / "conflict (~from vault1).md"
     assert renamed.exists(), "renamed file should exist to avoid destructive overwrite"
 
 
@@ -232,7 +232,7 @@ def test_delete_local_propagates_to_peer(env, tmp_path: Path):
         os.chdir(old_cwd)
 
     cid = "33333333-3333-3333-3333-333333333333"
-    rel = Path("01 Vault") / "to-delete.md"
+    rel = Path("Cast") / "to-delete.md"
     note_text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="Del", body="X")
     _write_file(root1 / rel, note_text)
 
@@ -278,7 +278,7 @@ def test_delete_peer_pulls_delete_locally(env, tmp_path: Path):
         os.chdir(old_cwd)
 
     cid = "44444444-4444-4444-4444-444444444444"
-    rel = Path("01 Vault") / "peer-deletes.md"
+    rel = Path("Cast") / "peer-deletes.md"
     text = _mk_note(cast_id=cid, peers=["vault1", "vault2"], title="PeerDel", body="Z")
     _write_file(root1 / rel, text)
 

@@ -85,7 +85,7 @@ def _read_cast_config(root: Path) -> tuple[str, str, str]:
         data = yaml.load(f) or {}
     cast_id = data.get("cast-id")
     cast_name = data.get("cast-name")
-    cast_location = data.get("cast-location", "01 Vault")
+    cast_location = data.get("cast-location", "Cast")
     if not cast_id or not cast_name:
         raise ValueError("config.yaml missing required fields: cast-id/cast-name")
     return cast_id, cast_name, cast_location
@@ -137,7 +137,7 @@ def _entry_from_reg(cast_id: str, payload: dict[str, Any]) -> CastEntry:
         cast_id=cast_id,
         name=payload.get("name", ""),
         root=Path(payload.get("root", "")),
-        vault_location=payload.get("vault_location", "01 Vault"),
+        vault_location=payload.get("vault_location", "Cast"),
     )
 
 

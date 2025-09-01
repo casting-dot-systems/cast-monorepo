@@ -26,7 +26,7 @@ uv run cast init --name "MyVault"
 
 This creates:
 - `.cast/` directory with configuration
-- `01 Vault/` folder for your Markdown files
+- `Cast/` folder for your Markdown files
 
 ### 2. Setup Local Configuration
 

@@ -75,7 +75,7 @@ def build_ephemeral_index(
     if limit_file:
         # Normalize limit_file to a path relative to the vault, supporting:
         #  - absolute paths under the vault
-        #  - callers that include the vault folder prefix (e.g. "01 Vault/foo.md")
+        #  - callers that include the vault folder prefix (e.g. "Cast/foo.md")
         lf = Path(limit_file)
         candidates: list[Path] = []
 
