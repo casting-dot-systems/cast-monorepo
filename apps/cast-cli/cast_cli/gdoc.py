@@ -1,7 +1,8 @@
-"""Google Docs integration for Cast CLI (create & pull).
+"""Google Docs integration for Cast CLI (create, add & pull).
 
 Commands:
-  cast gdoc new "<Title>" [--dir RELPATH] [--folder-id FOLDER] [--share-with EMAIL ...]
+  cast gdoc new "<Title>" [--dir RELPATH] [--folder-id FOLDER] [--share-with EMAIL ...] [--auto-pull]
+  cast gdoc add <doc_url> [--title TITLE] [--dir RELPATH] [--overwrite/--no-overwrite] [--auto-pull]
   cast gdoc pull [<file.md> | --all]   # Pull one file or every GDoc note (prefixed with '(GDoc) ')
 
 Auth precedence:
@@ -26,7 +27,7 @@ from cast_core.yamlio import write_cast_file, parse_cast_file, ensure_cast_field
 
 dotenv.load_dotenv()
 
-gdoc_app = typer.Typer(help="Google Docs integration (create & pull)")
+gdoc_app = typer.Typer(help="Google Docs integration (create, add & pull)")
 console = Console()
 yaml_rt = YAML()
 yaml_rt.preserve_quotes = True
@@ -286,7 +287,106 @@ def _pull_one_note(drive, docs, file: Path) -> Tuple[bool, Optional[str]]:
     return True, rev
 
 
+def _canonical_doc_url(drive, doc_id: str) -> str:
+    """Return a stable webViewLink for the Doc; fallback to a standard edit URL."""
+    try:
+        file = drive.files().get(
+            fileId=doc_id,
+            fields="webViewLink",
+            supportsAllDrives=True
+        ).execute()
+        url = file.get("webViewLink")
+        if url:
+            return url
+    except Exception:
+        pass
+    return f"https://docs.google.com/document/d/{doc_id}/edit"
+
+
+def _fetch_doc_title(docs, doc_id: str) -> Optional[str]:
+    """Fetch the Google Doc title (best effort)."""
+    try:
+        meta = docs.documents().get(documentId=doc_id).execute()
+        return meta.get("title")
+    except Exception:
+        return None
+
+
 # -------------------- commands --------------------
+@gdoc_app.command("add")
+def gdoc_add(
+    doc_url: str = typer.Argument(..., help="URL to an existing Google Doc"),
+    title: Optional[str] = typer.Option(
+        None, "--title", "-t", help="Override note title; otherwise use the Doc title"
+    ),
+    dir: Path = typer.Option(
+        Path("."), "--dir", help="Vault-relative directory to place the note"
+    ),
+    overwrite: bool = typer.Option(
+        True, "--overwrite/--no-overwrite", help="Overwrite the note if it already exists"
+    ),
+    auto_pull: bool = typer.Option(
+        True, "--auto-pull/--no-auto-pull", help="Automatically pull content after creating the note"
+    ),
+):
+    """
+    Attach an existing Google Doc by URL and create a '(GDoc) <Title>.md' note
+    with proper YAML front-matter (url, document_id, last-updated, cast-*).
+    Optionally auto-pulls the content immediately.
+    """
+    root, vault = _get_root_and_vault()
+
+    m = DOC_URL_ID_RE.search(doc_url)
+    if not m:
+        console.print("[red]Could not extract document ID from URL.[/red]")
+        raise typer.Exit(2)
+    doc_id = m.group(1)
+
+    drive, docs = _build_services(root)
+
+    # Get title if not provided
+    if not title:
+        title = _fetch_doc_title(docs, doc_id) or doc_id
+    safe_title = _sanitize_filename(title)
+
+    note_dir = (vault / dir).resolve()
+    note_dir.mkdir(parents=True, exist_ok=True)
+    note_path = note_dir / f"(GDoc) {safe_title}.md"
+    if note_path.exists() and not overwrite:
+        console.print(f"[red]Note already exists:[/red] {note_path} (pass --overwrite to replace)")
+        raise typer.Exit(2)
+
+    url = _canonical_doc_url(drive, doc_id)
+
+    # Initialize front-matter
+    front = {
+        "url": url,
+        "document_id": doc_id,
+        "last-updated": _now_iso(),
+    }
+    front, _ = ensure_cast_fields(front, generate_id=True)
+
+    body = (
+        "_This file is generated from Google Docs. "
+        "Edit the Google Doc via the link in YAML and run `cast gdoc pull` to refresh._\n"
+    )
+    write_cast_file(note_path, front, body, reorder=True)
+
+    console.print(f"[green]✔ Linked existing Google Doc[/green]: {url}")
+    console.print(f"[green]✔ Wrote note[/green]: {note_path}")
+    
+    # Auto-pull content if requested
+    if auto_pull:
+        console.print("[blue]Auto-pulling content...[/blue]")
+        success, rev = _pull_one_note(drive, docs, note_path)
+        if success:
+            console.print(f"[green]✔ Content pulled successfully[/green]")
+            if rev:
+                console.print(f"  revision_id: {rev}")
+        else:
+            console.print(f"[yellow]⚠ Auto-pull failed - you can manually run:[/yellow] cast gdoc pull {note_path}")
+
+
 @gdoc_app.command("new")
 def gdoc_new(
     title: str = typer.Argument(..., help="Title for the new note & Google Doc"),
@@ -295,9 +395,13 @@ def gdoc_new(
     share_with: List[str] = typer.Option(
         [], "--share-with", help="Email(s) to grant writer access to the Doc"
     ),
+    auto_pull: bool = typer.Option(
+        False, "--auto-pull/--no-auto-pull", help="Automatically pull content after creating the Doc"
+    ),
 ):
     """
     Create an empty Google Doc with the same title as the note and link it in YAML.
+    Optionally auto-pulls the content immediately (useful if Doc has initial content).
     """
     root, vault = _get_root_and_vault()
     
@@ -355,6 +459,17 @@ def gdoc_new(
 
     console.print(f"[green]✔ Created Google Doc[/green]: {url}")
     console.print(f"[green]✔ Wrote note[/green]: {note_path}")
+    
+    # Auto-pull content if requested
+    if auto_pull:
+        console.print("[blue]Auto-pulling content...[/blue]")
+        success, rev = _pull_one_note(drive, docs, note_path)
+        if success:
+            console.print(f"[green]✔ Content pulled successfully[/green]")
+            if rev:
+                console.print(f"  revision_id: {rev}")
+        else:
+            console.print(f"[yellow]⚠ Auto-pull failed - you can manually run:[/yellow] cast gdoc pull {note_path}")
 
 
 @gdoc_app.command("pull")
