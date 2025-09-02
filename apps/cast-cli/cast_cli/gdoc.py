@@ -1,8 +1,8 @@
-"""Google Docs integration for Cast CLI (one-way pull).
+"""Google Docs integration for Cast CLI (create & pull).
 
 Commands:
   cast gdoc new "<Title>" [--dir RELPATH] [--folder-id FOLDER] [--share-with EMAIL ...]
-  cast gdoc pull <file.md> [--no-extract-images]
+  cast gdoc pull [<file.md> | --all]   # Pull one file or every GDoc note (prefixed with '(GDoc) ')
 
 Auth precedence:
   1) Service account via GOOGLE_APPLICATION_CREDENTIALS
@@ -10,16 +10,16 @@ Auth precedence:
 """
 from __future__ import annotations
 
-import base64
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 import dotenv
 
 import typer
 from rich.console import Console
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 from ruamel.yaml import YAML
 
 from cast_core.yamlio import write_cast_file, parse_cast_file, ensure_cast_fields
@@ -37,10 +37,13 @@ DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 DOCS_SCOPES = ["https://www.googleapis.com/auth/documents.readonly"]
 SCOPES = DRIVE_SCOPES + DOCS_SCOPES
 
+# Extract a Google Doc ID from its URL
+DOC_URL_ID_RE = re.compile(r"/document/d/([a-zA-Z0-9_-]+)")
+
 
 # -------------------- small utils --------------------
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="minutes")
 
 
 def _sanitize_filename(name: str) -> str:
@@ -101,6 +104,7 @@ def _get_creds(root: Path):
     from google.oauth2.service_account import Credentials as SA
     from google.oauth2.credentials import Credentials as UserCreds
     from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
 
     # 1) Service account
     sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -117,6 +121,10 @@ def _get_creds(root: Path):
     if token.exists():
         try:
             creds = UserCreds.from_authorized_user_file(str(token), SCOPES)
+            # Refresh cached OAuth token if needed
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                token.write_text(creds.to_json(), encoding="utf-8")
         except Exception:
             creds = None
     if not creds:
@@ -214,34 +222,68 @@ def _create_google_doc(drive, title: str, parent_folder_id: Optional[str]) -> tu
 
 
 def _export_markdown(drive, doc_id: str) -> str:
-    data = drive.files().export(fileId=doc_id, mimeType="text/markdown", supportsAllDrives=True).execute()
+    data = drive.files().export(fileId=doc_id, mimeType="text/markdown").execute()
     return data.decode("utf-8")
 
 
-DATA_URI_RE = re.compile(r"!\[[^\]]*]\((data:image/[a-zA-Z]+;base64,[^)]+)\)")
+def _doc_id_from_frontmatter(fm: dict) -> Optional[str]:
+    """Best-effort extraction of a Google Doc ID from front matter."""
+    doc_id = (fm or {}).get("document_id")
+    if doc_id:
+        return doc_id
+    url = (fm or {}).get("url")
+    if isinstance(url, str):
+        m = DOC_URL_ID_RE.search(url)
+        if m:
+            return m.group(1)
+    return None
 
 
-def _extract_data_uris(md: str, media_dir_abs: Path, rel_prefix_from_file: Path, base_name: str) -> str:
+def _iter_gdoc_notes(vault: Path) -> Iterable[Path]:
+    """Yield Markdown notes that look like GDoc files based on '(GDoc)' prefix."""
+    for p in vault.rglob("*.md"):
+        try:
+            if p.name.lower().startswith("(gdoc) "):
+                yield p
+        except Exception:
+            continue
+
+
+def _pull_one_note(drive, docs, file: Path) -> Tuple[bool, Optional[str]]:
     """
-    Write embedded data-URI images to media_dir_abs and rewrite links to relative paths
-    from the Markdown file's parent.
+    Pull Markdown from the linked Google Doc and refresh the local note body.
+    Returns (ok, revision_id).
     """
-    media_dir_abs.mkdir(parents=True, exist_ok=True)
-    # Compute the relative prefix from file parent to media_dir_abs (POSIX-ish for Markdown)
-    rel_prefix = Path(os.path.relpath(media_dir_abs, start=rel_prefix_from_file)).as_posix()
-    idx = 1
+    fm, _, _ = parse_cast_file(file)
+    if fm is None:
+        console.print(f"[red]File lacks YAML front matter:[/red] {file}")
+        return False, None
+    doc_id = _doc_id_from_frontmatter(fm)
+    if not doc_id:
+        console.print(f"[red]document_id missing in front matter (and could not be inferred from url):[/red] {file}")
+        return False, None
 
-    def repl(m):
-        nonlocal idx
-        uri = m.group(1)
-        header, b64 = uri.split(",", 1)
-        ext = header.split("/")[1].split(";")[0]
-        fname = f"{base_name}-img-{idx}.{ext}"
-        (media_dir_abs / fname).write_bytes(base64.b64decode(b64))
-        idx += 1
-        return m.group(0).replace(uri, f"{rel_prefix}/{fname}")
+    # Export Markdown
+    try:
+        md = _export_markdown(drive, doc_id)
+    except Exception as e:
+        console.print(f"[red]Export failed for {file} (doc {doc_id}):[/red] {e}")
+        return False, None
 
-    return DATA_URI_RE.sub(repl, md)
+    # Get revisionId for provenance (best-effort)
+    try:
+        doc = docs.documents().get(documentId=doc_id).execute()
+        rev = doc.get("revisionId")
+    except Exception:
+        rev = None
+
+    # Update FM
+    fm["last-updated"] = _now_iso()
+    # Drop legacy image-related field if present
+    fm.pop("media_dir", None)
+
+    write_cast_file(file, fm, md, reorder=True)
+    return True, rev
 
 
 # -------------------- commands --------------------
@@ -276,7 +318,7 @@ def gdoc_new(
 
     # File path
     safe_title = _sanitize_filename(title)
-    note_path = (vault / dir).resolve() / f"{safe_title}.md"
+    note_path = (vault / dir).resolve() / f"(GDoc) {safe_title}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create Doc
@@ -297,9 +339,9 @@ def gdoc_new(
 
     # Initialize front-matter
     front = {
+        # Provenance block
         "url": url,
-        "media_dir": f"Media/GDoc/{doc_id}",
-        "pulled_at": None,
+        "document_id": doc_id,
         # Ensure Cast fields exist (cast-id, cast-version).
         # cast-vaults/codebases left to the user or hsync to manage.
     }
@@ -317,61 +359,57 @@ def gdoc_new(
 
 @gdoc_app.command("pull")
 def gdoc_pull(
-    file: Path = typer.Argument(..., help="Path to local Cast note (Markdown)"),
-    extract_images: bool = typer.Option(True, "--extract-images/--no-extract-images"),
+    file: Optional[Path] = typer.Argument(
+        None,
+        help="Path to local Cast note (Markdown). Omit and use --all to pull every GDoc note."
+    ),
+    all_: bool = typer.Option(
+        False, "--all", "-a", "--a",
+        help="Pull all GDoc notes in the vault (files prefixed with '(GDoc) ')."
+    ),
 ):
     """
-    Pull Markdown from the linked Google Doc and refresh the local note body.
+    Pull Markdown from the linked Google Doc(s) and refresh the local note body/bodies.
+    Use either a single <file.md> argument or --all / -a / --a.
     """
     root, vault = _get_root_and_vault()
+    drive, docs = _build_services(root)
+
+    # Pull everything
+    if all_:
+        files = list(_iter_gdoc_notes(vault))
+        if not files:
+            console.print("[yellow]No '(GDoc) ' notes found in the vault.[/yellow]")
+            raise typer.Exit(0)
+
+        console.print(f"[bold]Pulling {len(files)} GDoc note(s)...[/bold]")
+        ok = 0
+        failed = 0
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+        ) as progress:
+            t = progress.add_task("Pulling", total=len(files))
+            for p in files:
+                success, _rev = _pull_one_note(drive, docs, p)
+                ok += 1 if success else 0
+                failed += 0 if success else 1
+                progress.advance(t, 1)
+
+        console.print(f"[green]✔ Completed[/green] — {ok} succeeded, {failed} failed.")
+        raise typer.Exit(0 if failed == 0 else 1)
+
+    # Pull a single file
+    if not file:
+        console.print("[red]Provide a <file.md> or use --all/-a.[/red]")
+        raise typer.Exit(2)
     if not file.exists():
         console.print(f"[red]Not found:[/red] {file}")
         raise typer.Exit(2)
 
-    # Parse current front-matter
-    fm, _, has_cast = parse_cast_file(file)
-    if fm is None:
-        console.print("[red]File lacks YAML front matter.[/red]")
+    success, rev = _pull_one_note(drive, docs, file)
+    if not success:
         raise typer.Exit(2)
-    source = fm.get("source") or {}
-    doc_id = source.get("document_id")
-    if not doc_id:
-        console.print("[red]source.document_id missing in front matter[/red]")
-        raise typer.Exit(2)
-
-    drive, docs = _build_services(root)
-
-    # Export Markdown
-    try:
-        md = _export_markdown(drive, doc_id)
-    except Exception as e:
-        console.print(f"[red]Export failed:[/red] {e}")
-        raise typer.Exit(2)
-
-    # Extract images
-    if extract_images:
-        media_rel = source.get("media_dir") or f"media/gdoc/{doc_id}"
-        media_abs = (vault / media_rel).resolve()
-        md = _extract_data_uris(
-            md,
-            media_dir_abs=media_abs,
-            rel_prefix_from_file=file.parent.resolve(),
-            base_name=file.stem,
-        )
-
-    # Get revisionId for provenance
-    try:
-        doc = docs.documents().get(documentId=doc_id).execute()
-        rev = doc.get("revisionId")
-    except Exception:
-        rev = None
-
-    # Update FM
-    fm.setdefault("source", {})
-    fm["source"]["revision_id"] = rev
-    fm["source"]["pulled_at"] = _now_iso()
-
-    write_cast_file(file, fm, md, reorder=True)
-    console.print(f"[green]✔ Pulled Doc[/green] {doc_id} → updated {file}")
-    if rev:
-        console.print(f"  revision_id: {rev}")
+    console.print(f"[green]✔ Updated[/green] {file}")
