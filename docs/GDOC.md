@@ -1,6 +1,6 @@
 # Google Docs ↔ Cast (pull-only)
 
-This document explains how to use the `cast gdoc` commands to keep a local Cast note linked to a Google Doc.
+This document explains how to use the `cast gdoc` commands to keep a local Cast note linked to a Google Doc. The note stores only the Google **Doc URL**; the Doc ID is derived from the URL at runtime.
 
 > **Model:** Google Doc is the source of truth. Cast pulls on demand.
 
@@ -42,26 +42,19 @@ cast gdoc new "Decision: Deprecate Legacy Parser" \
 
 This will:
 - Create an empty Google Doc titled `Decision: Deprecate Legacy Parser`
-- Create `Cast/Notes/Decisions/Decision: Deprecate Legacy Parser.md` with YAML:
+- Create `Cast/Notes/Decisions/(GDoc) Decision: Deprecate Legacy Parser.md` with YAML:
   ```yaml
   ---
   title: "Decision: Deprecate Legacy Parser"
   cast-id: "<generated>"
   cast-version: 1
-  source:
-    kind: google_doc
-    url: "https://docs.google.com/document/d/<DocID>/edit"
-    document_id: "<DocID>"
-    pull_mode: "drive.export:text/markdown"
-    media_dir: "media/gdoc/<DocID>"
-    revision_id: null
-    pulled_at: null
-    do_not_edit: true
+  url: "https://docs.google.com/document/d/<DocID>/edit"
+  last-updated: "YYYY-MM-DDTHH:MM±TZ"
   ---
   _This file is generated from Google Docs..._
   ```
 
-Teammates click `source.url` to edit the Doc.
+Teammates click `url` to edit the Doc.
 
 ## Pull updates
 
@@ -70,14 +63,14 @@ cast gdoc pull Cast/Notes/Decisions/Decision: Deprecate Legacy Parser.md
 ```
 
 - Exports the Doc as Markdown and overwrites the **body** of the note (YAML preserved).
-- Embedded images are extracted from data URIs to `media/gdoc/<DocID>/...` and links are rewritten
-  to **relative** paths from the note.
-- Updates `source.revision_id` and `source.pulled_at`.
+- Updates `last-updated` and may record the Doc `revision_id` internally (best effort; not stored in YAML).
 
-Disable image extraction (keep data URIs):
-```bash
-cast gdoc pull Cast/foo.md --no-extract-images
-```
+### Legacy notes
+
+Older notes may still contain a `document_id` field. On the next pull:
+
+- If `url` is missing but `document_id` exists, the CLI synthesizes a canonical `url`.
+- `document_id` is removed from YAML.
 
 ## Notes / constraints
 
@@ -85,3 +78,4 @@ cast gdoc pull Cast/foo.md --no-extract-images
 - Comments/suggestions in Docs are not pulled (we only pull the final rendered content).
 - This integration is **pull-only** by design. Edit in Google Docs; commit pulled Markdown to Git.
 - `cast-id` is generated on `new` so the file participates in sync immediately.
+- Only the Doc `url` is stored; the Doc ID is parsed from the URL each time.

@@ -227,11 +227,8 @@ def _export_markdown(drive, doc_id: str) -> str:
     return data.decode("utf-8")
 
 
-def _doc_id_from_frontmatter(fm: dict) -> Optional[str]:
-    """Best-effort extraction of a Google Doc ID from front matter."""
-    doc_id = (fm or {}).get("document_id")
-    if doc_id:
-        return doc_id
+def _doc_id_from_url_field(fm: dict) -> Optional[str]:
+    """Extract Google Doc ID solely from the 'url' field in front matter."""
     url = (fm or {}).get("url")
     if isinstance(url, str):
         m = DOC_URL_ID_RE.search(url)
@@ -259,9 +256,20 @@ def _pull_one_note(drive, docs, file: Path) -> Tuple[bool, Optional[str]]:
     if fm is None:
         console.print(f"[red]File lacks YAML front matter:[/red] {file}")
         return False, None
-    doc_id = _doc_id_from_frontmatter(fm)
+    # Primary path: derive doc_id from URL
+    doc_id = _doc_id_from_url_field(fm)
+    # Legacy migration: if URL missing but legacy 'document_id' exists, synthesize URL and migrate
+    if not doc_id and isinstance(fm, dict) and fm.get("document_id"):
+        legacy_id = str(fm["document_id"])
+        # Best-effort canonical URL (fall back to edit URL if needed)
+        try:
+            url = _canonical_doc_url(drive, legacy_id)
+        except Exception:
+            url = f"https://docs.google.com/document/d/{legacy_id}/edit"
+        fm["url"] = url
+        doc_id = legacy_id
     if not doc_id:
-        console.print(f"[red]document_id missing in front matter (and could not be inferred from url):[/red] {file}")
+        console.print(f"[red]Missing or invalid 'url' in front matter (cannot derive Google Doc ID):[/red] {file}")
         return False, None
 
     # Export Markdown
@@ -282,6 +290,8 @@ def _pull_one_note(drive, docs, file: Path) -> Tuple[bool, Optional[str]]:
     fm["last-updated"] = _now_iso()
     # Drop legacy image-related field if present
     fm.pop("media_dir", None)
+    # Remove legacy document_id if present (we no longer store or rely on it)
+    fm.pop("document_id", None)
 
     write_cast_file(file, fm, md, reorder=True)
     return True, rev
@@ -331,7 +341,7 @@ def gdoc_add(
 ):
     """
     Attach an existing Google Doc by URL and create a '(GDoc) <Title>.md' note
-    with proper YAML front-matter (url, document_id, last-updated, cast-*).
+    with YAML front-matter (url, last-updated, cast-*) only. The Doc ID is derived from the URL at runtime.
     Optionally auto-pulls the content immediately.
     """
     root, vault = _get_root_and_vault()
@@ -361,7 +371,6 @@ def gdoc_add(
     # Initialize front-matter
     front = {
         "url": url,
-        "document_id": doc_id,
         "last-updated": _now_iso(),
     }
     front, _ = ensure_cast_fields(front, generate_id=True)
@@ -400,8 +409,8 @@ def gdoc_new(
     ),
 ):
     """
-    Create an empty Google Doc with the same title as the note and link it in YAML.
-    Optionally auto-pulls the content immediately (useful if Doc has initial content).
+    Create an empty Google Doc with the same title as the note and link it with a 'url' in YAML.
+    Optionally auto-pulls the content immediately (useful if the Doc has initial content).
     """
     root, vault = _get_root_and_vault()
     
@@ -443,9 +452,7 @@ def gdoc_new(
 
     # Initialize front-matter
     front = {
-        # Provenance block
         "url": url,
-        "document_id": doc_id,
         # Ensure Cast fields exist (cast-id, cast-version).
         # cast-vaults/codebases left to the user or hsync to manage.
     }
