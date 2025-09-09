@@ -550,5 +550,12 @@ try:
 except Exception:
     pass
 
+try:
+    from cast_cli.tui import tui_app
+    # `cast tui` runs the interactive shell directly (callback with invoke_without_command=True)
+    app.add_typer(tui_app, name="tui")
+except Exception:
+    pass
+
 if __name__ == "__main__":
     app()
