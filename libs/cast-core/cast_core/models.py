@@ -68,6 +68,9 @@ class SyncStateEntry(BaseModel):
 
     digest: str = Field(description="SHA256 hex digest")
     ts: str = Field(description="Timestamp YYYY-MM-DD HH:mm")
+    # NEW: optional vault-relative paths captured at baseline time
+    rel: str | None = Field(default=None, description="Local vault-relative path at baseline")
+    peer_rel: str | None = Field(default=None, description="Peer vault-relative path at baseline")
 
 
 class SyncState(BaseModel):

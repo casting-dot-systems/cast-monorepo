@@ -142,7 +142,12 @@ class HorizontalSync:
         for cast_id, peers in self.syncstate.baselines.items():
             data["baselines"][cast_id] = {}
             for peer_name, entry in peers.items():
-                data["baselines"][cast_id][peer_name] = {"digest": entry.digest, "ts": entry.ts}
+                row = {"digest": entry.digest, "ts": entry.ts}
+                if getattr(entry, "rel", None):
+                    row["rel"] = entry.rel
+                if getattr(entry, "peer_rel", None):
+                    row["peer_rel"] = entry.peer_rel
+                data["baselines"][cast_id][peer_name] = row
 
         # Write atomically
         temp_path = syncstate_path.parent / f".{syncstate_path.name}.casttmp"
@@ -180,7 +185,12 @@ class HorizontalSync:
         for cast_id, peers in state.baselines.items():
             data["baselines"][cast_id] = {}
             for peer_name, entry in peers.items():
-                data["baselines"][cast_id][peer_name] = {"digest": entry.digest, "ts": entry.ts}
+                row = {"digest": entry.digest, "ts": entry.ts}
+                if getattr(entry, "rel", None):
+                    row["rel"] = entry.rel
+                if getattr(entry, "peer_rel", None):
+                    row["peer_rel"] = entry.peer_rel
+                data["baselines"][cast_id][peer_name] = row
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.parent / f".{path.name}.casttmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -224,6 +234,24 @@ class HorizontalSync:
         if p.parts and p.parts[0] == self.vault_path.name:
             return str(Path(*p.parts[1:]))
         return str(p)
+
+    def _local_rel(self, p: Path) -> str:
+        """Get vault-relative path for a local file."""
+        try:
+            return str(p.relative_to(self.vault_path))
+        except Exception:
+            return p.name
+
+    def _peer_rel_str(self, peer_name: str, peer_root: Path | None, p: Path | None) -> str | None:
+        """Get vault-relative path for a peer file."""
+        if p is None or peer_root is None:
+            return None
+        try:
+            entry = resolve_cast_by_name(peer_name)
+            base = (peer_root / entry.vault_location) if (entry and peer_root) else None
+            return str(p.relative_to(base)) if base else p.name
+        except Exception:
+            return p.name
 
     def _safe_dest(self, base: Path, suffix: str) -> Path:
         """Return a non-existing path by appending a suffix (and counter if needed)."""
@@ -270,19 +298,29 @@ class HorizontalSync:
         return dest
 
     def _update_baseline_both(
-        self, cast_id: str, peer_name: str, digest: str, peer_root: Path | None
+        self, cast_id: str, peer_name: str, digest: str,
+        peer_root: Path | None,
+        local_rel: str | None = None, peer_rel: str | None = None
     ) -> None:
         """Update baselines in local and peer syncstate (symmetrically)."""
-        self._update_baseline(cast_id, peer_name, digest)
+        # local (our perspective)
+        self._update_baseline(cast_id, peer_name, digest, local_rel=local_rel, peer_rel=peer_rel)
         if peer_root is None:
             return
-        # In peer's syncstate, the peer name key should be *our* name.
+        # peer (their perspective) — flip roles of rel/peer_rel
         their_state = self._load_peer_syncstate(peer_root)
         if cast_id not in their_state.baselines:
             their_state.baselines[cast_id] = {}
-        their_state.baselines[cast_id][self.config.cast_name] = SyncStateEntry(
-            digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
+        entry = their_state.baselines[cast_id].get(self.config.cast_name)
+        if entry is None:
+            entry = SyncStateEntry(digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M"))
+            their_state.baselines[cast_id][self.config.cast_name] = entry
+        entry.digest = digest
+        entry.ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if peer_rel is not None:
+            entry.rel = peer_rel
+        if local_rel is not None:
+            entry.peer_rel = local_rel
         self._save_peer_syncstate(peer_root, their_state)
 
     def _resolve_peer_vault_path(self, peer_name: str) -> Path | None:
@@ -359,58 +397,98 @@ class HorizontalSync:
 
     def _decide_sync(self, local_rec, peer_rec, peer_name: str, mode: str) -> SyncDecision:
         """
-        Decide 3-way sync action for a file/peer pair.
+        Decide 3-way sync action for a file/peer pair with path-aware logic.
         """
         cast_id = local_rec["cast_id"]
         local_digest = local_rec["digest"]
-
-        # Get baseline
-        baseline = None
+        
+        # fetch full baseline (paths + digest)
+        b_entry = None
         if cast_id in self.syncstate.baselines and peer_name in self.syncstate.baselines[cast_id]:
-            baseline = self.syncstate.baselines[cast_id][peer_name].digest
+            b_entry = self.syncstate.baselines[cast_id][peer_name]
+        baseline = (b_entry.digest if b_entry else None)
 
+        # Peer entirely missing
         if peer_rec is None:
-            # Peer doesn't have the file at all
             if baseline is None:
-                # First contact; only push if live
                 return SyncDecision.CREATE_PEER if mode == "live" else SyncDecision.NO_OP
-            else:
-                # Baseline exists → peer deleted OR never had it after baseline
-                # If local unchanged since baseline → fast-forward accept deletion (delete local)
-                # Otherwise it's a conflict (peer missing vs local modified)
-                if local_digest == baseline:
-                    return SyncDecision.DELETE_LOCAL
-                else:
-                    return SyncDecision.CONFLICT
+            # With baseline: distinguish deletion vs. "local-only rename"
+            if local_digest == baseline:
+                local_moved = bool(b_entry and b_entry.rel and (local_rec["relpath"] != b_entry.rel))
+                if local_moved:
+                    # Peer missing but only local renamed since baseline → create on peer at new path
+                    return SyncDecision.CREATE_PEER if mode == "live" else SyncDecision.NO_OP
+                # Otherwise: accept peer deletion if local unchanged
+                return SyncDecision.DELETE_LOCAL
+            # content diverged but peer missing → conflict
+            return SyncDecision.CONFLICT
 
         peer_digest = peer_rec["digest"]
 
+        # First contact (no baseline)
         if baseline is None:
-            # First contact, both exist
             if local_digest == peer_digest:
-                # If same content but paths differ, prefer a rename decision.
                 if local_rec["relpath"] != peer_rec["relpath"]:
-                    return SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.RENAME_LOCAL
+                    if mode == "live":
+                        return SyncDecision.RENAME_PEER
+                    else:
+                        # WATCH peers must not force local renames if we have any LIVE peers.
+                        has_any_live = any(
+                            (m == "live" and n != self.config.cast_name)
+                            for n, m in local_rec.get("peers", {}).items()
+                        )
+                        if has_any_live:
+                            return SyncDecision.NO_OP
+                        return SyncDecision.RENAME_LOCAL
                 return SyncDecision.NO_OP
-            else:
-                return SyncDecision.CONFLICT
-
-        # 3-way comparison
-        if local_digest == baseline and peer_digest != baseline:
-            # Fast-forward pull
-            return SyncDecision.PULL
-        elif peer_digest == baseline and local_digest != baseline:
-            # Fast-forward push
-            if mode == "live":
-                return SyncDecision.PUSH
-            else:
-                return SyncDecision.NO_OP  # Watch mode, no push
-        elif local_digest != baseline and peer_digest != baseline and local_digest != peer_digest:
             return SyncDecision.CONFLICT
 
-        # At this point digests are aligned to baseline, but we may still have a path mismatch.
-        if local_rec["relpath"] != peer_rec["relpath"]:
-            return SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.RENAME_LOCAL
+        # With baseline: see who moved
+        local_moved = bool(b_entry and b_entry.rel and (local_rec["relpath"] != b_entry.rel))
+        peer_moved = bool(b_entry and b_entry.peer_rel and (peer_rec["relpath"] != b_entry.peer_rel))
+
+        # Pure rename(s) (content unchanged on both sides)
+        if local_digest == baseline and peer_digest == baseline:
+            if local_moved and not peer_moved:
+                return SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.NO_OP
+            if peer_moved and not local_moved:
+                # watch policy: only rename local if all peers are watch-only
+                if mode == "live":
+                    return SyncDecision.RENAME_LOCAL
+                has_any_live = any(
+                    (m == "live" and n != self.config.cast_name)
+                    for n, m in local_rec.get("peers", {}).items()
+                )
+                return SyncDecision.NO_OP if has_any_live else SyncDecision.RENAME_LOCAL
+            if local_moved and peer_moved:
+                # both moved, possibly to different places → structural conflict
+                if local_rec["relpath"] != peer_rec["relpath"]:
+                    return SyncDecision.CONFLICT
+            # neither moved or both moved to same place
+            return SyncDecision.NO_OP
+
+        # Fast-forward cases with possible path drift:
+        if local_digest == baseline and peer_digest != baseline:
+            # pull to local; pull writes to local path, baseline will capture paths later
+            return SyncDecision.PULL
+        if peer_digest == baseline and local_digest != baseline:
+            # push to peer's path chosen as local_rel (includes rename+content in one step)
+            return SyncDecision.PUSH if mode == "live" else SyncDecision.NO_OP
+
+        # both content changed and differ → conflict
+        if local_digest != baseline and peer_digest != baseline and local_digest != peer_digest:
+            return SyncDecision.CONFLICT
+
+        # Otherwise, if digests equal but path mismatch (e.g., converged content):
+        if local_digest == peer_digest and local_rec["relpath"] != peer_rec["relpath"]:
+            if mode == "live":
+                return SyncDecision.RENAME_PEER
+            else:
+                has_any_live = any(
+                    (m == "live" and n != self.config.cast_name)
+                    for n, m in local_rec.get("peers", {}).items()
+                )
+                return SyncDecision.NO_OP if has_any_live else SyncDecision.RENAME_LOCAL
 
         return SyncDecision.NO_OP
 
@@ -700,10 +778,15 @@ class HorizontalSync:
                 # If identical content, ensure baseline is correct.
                 # Covers both "first contact identical" and "both sides converged to same digest".
                 if plan.peer_digest is not None and plan.local_digest == plan.peer_digest:
-                    if plan.baseline_digest != plan.local_digest:
-                        self._update_baseline_both(
-                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
-                        )
+                    # ALWAYS refresh paths (even if digest unchanged)
+                    self._update_baseline_both(
+                        plan.cast_id,
+                        plan.peer_name,
+                        plan.peer_digest or plan.local_digest,
+                        plan.peer_root,
+                        local_rel=self._local_rel(plan.local_path),
+                        peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
+                    )
                 continue
 
             logger.info(
@@ -713,10 +796,31 @@ class HorizontalSync:
             try:
                 if plan.decision == SyncDecision.PULL:
                     # Copy peer to local
+                    # If peer moved since baseline, adopt PEER name/path before pulling
+                    if plan.peer_path:
+                        peer_rel_now = self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path)
+                        local_rel_now = self._local_rel(plan.local_path)
+                        if peer_rel_now and local_rel_now != peer_rel_now:
+                            target = self.vault_path / peer_rel_now
+                            before = plan.local_path
+                            after = self._safe_move(plan.local_path, target, provenance=plan.peer_name)
+                            plan.local_path = after
+                            try:
+                                _from = str(before.relative_to(self.vault_path))
+                                _to = str(after.relative_to(self.vault_path))
+                            except Exception:
+                                _from, _to = before.name, after.name
+                            self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                            self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
+                            self.summary.items.append(
+                                SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}")
+                            )
                     if plan.peer_path:
                         self._safe_copy(plan.peer_path, plan.local_path, provenance=plan.peer_name)
                         self._update_baseline_both(
-                            plan.cast_id, plan.peer_name, plan.peer_digest or "", plan.peer_root
+                            plan.cast_id, plan.peer_name, plan.peer_digest or "", plan.peer_root,
+                            local_rel=self._local_rel(plan.local_path),
+                            peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
                         )
                     # summary
                     try:
@@ -739,11 +843,41 @@ class HorizontalSync:
                 elif plan.decision in (SyncDecision.PUSH, SyncDecision.CREATE_PEER):
                     # Copy local to peer
                     if plan.peer_path:
+                        # If peer exists but path differs from local (rename+edit), rename peer first
+                        local_rel_now = self._local_rel(plan.local_path)
+                        peer_rel_now = self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path)
+                        if peer_rel_now and local_rel_now != peer_rel_now:
+                            # Compute peer vault base
+                            try:
+                                entry = resolve_cast_by_name(plan.peer_name)
+                                peer_vault_base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            except Exception:
+                                peer_vault_base = None
+                            if peer_vault_base:
+                                desired = peer_vault_base / local_rel_now
+                            else:
+                                # best-effort
+                                desired = plan.peer_path.parent / Path(local_rel_now).name
+                            before = plan.peer_path
+                            after = self._safe_move(plan.peer_path, desired, provenance="LOCAL")
+                            plan.peer_path = after
+                            try:
+                                entry = resolve_cast_by_name(plan.peer_name)
+                                base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                _from = str(before.relative_to(base)) if base else before.name
+                                _to = str(after.relative_to(base)) if base else after.name
+                            except Exception:
+                                _from, _to = before.name, after.name
+                            self._log_event("rename_peer", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                            self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
+                            self.summary.items.append(SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel_now, _to, f"peer: {_from} → {_to}"))
                         self._safe_copy(
                             plan.local_path, plan.peer_path, provenance=self.config.cast_name
                         )
                         self._update_baseline_both(
-                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                            plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root,
+                            local_rel=self._local_rel(plan.local_path),
+                            peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
                         )
                     try:
                         local_rel = str(plan.local_path.relative_to(self.vault_path))
@@ -844,6 +978,8 @@ class HorizontalSync:
                             plan.peer_name,
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
+                            local_rel=self._local_rel(plan.local_path),
+                            peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, after),
                         )
                         # summary
                         try:
@@ -877,6 +1013,8 @@ class HorizontalSync:
                             plan.peer_name,
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
+                            local_rel=self._local_rel(after),
+                            peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
                         )
                         self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
                         self.summary.items.append(
@@ -897,7 +1035,31 @@ class HorizontalSync:
                     )
 
                     if resolution == ConflictResolution.KEEP_LOCAL:
-                        # overwrite peer with local, then update baselines on both sides
+                        # Adopt LOCAL path/name on peer if mismatch, then overwrite peer with local
+                        if plan.peer_path and plan.peer_path.exists():
+                            local_rel_now = self._local_rel(plan.local_path)
+                            peer_rel_now = self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path)
+                            if peer_rel_now and local_rel_now != peer_rel_now:
+                                # compute desired path in peer vault
+                                try:
+                                    entry = resolve_cast_by_name(plan.peer_name)
+                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                except Exception:
+                                    base = None
+                                desired = (base / local_rel_now) if base else plan.peer_path.parent / Path(local_rel_now).name
+                                before = plan.peer_path
+                                after = self._safe_move(plan.peer_path, desired, provenance="LOCAL")
+                                plan.peer_path = after
+                                try:
+                                    entry = resolve_cast_by_name(plan.peer_name)
+                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                    _from = str(before.relative_to(base)) if base else before.name
+                                    _to = str(after.relative_to(base)) if base else after.name
+                                except Exception:
+                                    _from, _to = before.name, after.name
+                                self._log_event("rename_peer", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                                self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
+                                self.summary.items.append(SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel_now, _to, f"peer: {_from} → {_to}"))
                         if plan.local_path.exists():
                             if plan.peer_path:
                                 self._safe_copy(
@@ -906,7 +1068,9 @@ class HorizontalSync:
                                     provenance=self.config.cast_name,
                                 )
                             self._update_baseline_both(
-                                plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root
+                                plan.cast_id, plan.peer_name, plan.local_digest, plan.peer_root,
+                                local_rel=self._local_rel(plan.local_path),
+                                peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
                             )
                         else:
                             # conflict due to local deletion; KEEP_LOCAL means keep deletion → delete peer
@@ -923,6 +1087,23 @@ class HorizontalSync:
                             SummaryItem("conflict", plan.cast_id, plan.peer_name, local_rel, None, "resolved: KEEP_LOCAL")
                         )
                     elif resolution == ConflictResolution.KEEP_PEER:
+                        # Adopt PEER path/name locally if mismatch, then pull peer content
+                        if plan.peer_path and plan.local_path.exists():
+                            peer_rel_now = self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path)
+                            local_rel_now = self._local_rel(plan.local_path)
+                            if peer_rel_now and local_rel_now != peer_rel_now:
+                                target = self.vault_path / peer_rel_now
+                                before = plan.local_path
+                                after = self._safe_move(plan.local_path, target, provenance=plan.peer_name)
+                                plan.local_path = after
+                                try:
+                                    _from = str(before.relative_to(self.vault_path))
+                                    _to = str(after.relative_to(self.vault_path))
+                                except Exception:
+                                    _from, _to = before.name, after.name
+                                self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                                self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
+                                self.summary.items.append(SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}"))
                         if plan.peer_path:
                             self._safe_copy(
                                 plan.peer_path, plan.local_path, provenance=plan.peer_name
@@ -932,6 +1113,8 @@ class HorizontalSync:
                                 plan.peer_name,
                                 plan.peer_digest or "",
                                 plan.peer_root,
+                                local_rel=self._local_rel(plan.local_path),
+                                peer_rel=self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path),
                             )
                         try:
                             local_rel = str(plan.local_path.relative_to(self.vault_path))
@@ -969,14 +1152,22 @@ class HorizontalSync:
 
         return exit_code
 
-    def _update_baseline(self, cast_id: str, peer_name: str, digest: str) -> None:
+    def _update_baseline(self, cast_id: str, peer_name: str, digest: str,
+                         local_rel: str | None = None, peer_rel: str | None = None) -> None:
         """Update baseline digest for a file/peer pair."""
         if cast_id not in self.syncstate.baselines:
             self.syncstate.baselines[cast_id] = {}
-
-        self.syncstate.baselines[cast_id][peer_name] = SyncStateEntry(
-            digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M")
-        )
+        existing = self.syncstate.baselines[cast_id].get(peer_name)
+        if existing is None:
+            existing = SyncStateEntry(digest=digest, ts=datetime.now().strftime("%Y-%m-%d %H:%M"))
+            self.syncstate.baselines[cast_id][peer_name] = existing
+        # always refresh digest/ts; update paths when provided
+        existing.digest = digest
+        existing.ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if local_rel is not None:
+            existing.rel = local_rel
+        if peer_rel is not None:
+            existing.peer_rel = peer_rel
 
     def sync(
         self,

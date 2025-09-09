@@ -8,6 +8,7 @@ from enum import Enum
 from io import StringIO
 from pathlib import Path
 
+from cast_core.registry import resolve_cast_by_name
 from cast_core.yamlio import reorder_cast_fields
 from rich import box
 from rich.console import Console
@@ -89,6 +90,23 @@ def handle_conflict(
         )
     except Exception:
         local_preview, peer_preview = "", ""
+
+    # Resolve vault-relative paths for clearer UI (names/paths)
+    def _local_cast_info(root: Path) -> tuple[str, Path]:
+        try:
+            cfg = root / ".cast" / "config.yaml"
+            data = _yaml.load(cfg.read_text(encoding="utf-8")) or {}
+            cast_name = data.get("cast-name", "LOCAL")
+            vault_loc = data.get("cast-location", "Cast")
+            return cast_name, (root / vault_loc)
+        except Exception:
+            return "LOCAL", (root / "Cast")
+
+    cast_name, local_vault_path = _local_cast_info(cast_root)
+    def _rel_or_name(base: Path | None, p: Path | None) -> str:
+        if base is None or p is None: return p.name if p else ""
+        try: return str(p.relative_to(base))
+        except Exception: return p.name
 
     # Number of context lines to show around diffs (fold the rest).
     # Can be adjusted per-run via environment variable.
@@ -285,19 +303,40 @@ def handle_conflict(
         return table
 
     if interactive:
-        # Load local cast-name for clarity in legend
-        def _local_cast_name(root: Path) -> str:
-            try:
-                cfg = root / ".cast" / "config.yaml"
-                if not cfg.exists():
-                    return "LOCAL"
-                data = _yaml.load(cfg.read_text(encoding="utf-8")) or {}
-                return data.get("cast-name", "LOCAL")
-            except Exception:
-                return "LOCAL"
-
-        cast_name = _local_cast_name(cast_root)
         console.rule("[bold red]Conflict detected[/bold red]")
+
+        # Split both sides into (yaml, body)
+        local_yaml, local_body = _split_front_matter(local_preview or "")
+        peer_yaml, peer_body = _split_front_matter(peer_preview or "")
+
+        # Compute rel paths & titles for both sides
+        # LOCAL
+        local_rel = _rel_or_name(local_vault_path, local_path)
+        local_title = None
+        if local_yaml is not None:
+            try:
+                y = _yaml.load(local_yaml) or {}
+                if isinstance(y, dict):
+                    local_title = y.get("title") or y.get("name")
+            except Exception:
+                pass
+        # PEER
+        peer_rel = ""
+        peer_title = None
+        if peer_path:
+            try:
+                entry = resolve_cast_by_name(peer_name)
+                base = (entry.root / entry.vault_location) if entry else None
+                peer_rel = _rel_or_name(base, peer_path)
+            except Exception:
+                peer_rel = peer_path.name
+        if peer_yaml is not None:
+            try:
+                y = _yaml.load(peer_yaml) or {}
+                if isinstance(y, dict):
+                    peer_title = y.get("title") or y.get("name")
+            except Exception:
+                pass
 
         # Legend panel
         legend = Table.grid(padding=(0, 2))
@@ -308,16 +347,17 @@ def handle_conflict(
             f"[bold]Right:[/bold] PEER [[magenta]{peer_name}[/magenta]]",
         )
         legend.add_row(
+            f"• File: [white]{local_rel}[/white]" + (f"  — title: [white]{local_title}[/white]" if local_title else ""),
+            ("• File: [white]" + (peer_rel or "(missing)") + "[/white]"
+             + (f"  — title: [white]{peer_title}[/white]" if peer_title else "")),
+        )
+        legend.add_row(
             "[red]Red[/red]: change/delete in LOCAL", "[green]Green[/green]: add/change in PEER"
         )
         legend.add_row(
             "[dim]Lines with changes have background highlights[/dim]", "[dim]Character changes are emphasized within lines[/dim]"
         )
         console.print(Panel(legend, title="Diff legend", expand=True))
-
-        # Split both sides into (yaml, body)
-        local_yaml, local_body = _split_front_matter(local_preview or "")
-        peer_yaml, peer_body = _split_front_matter(peer_preview or "")
 
         # YAML diff (empty string if missing)
         yaml_left = _canonicalize_yaml_for_diff(local_yaml) if local_yaml is not None else ""
@@ -342,13 +382,19 @@ def handle_conflict(
         console.print(Panel(body_table, title="Markdown body (side‑by‑side diff)", expand=True))
 
     if not interactive:
-        # Non-interactive: keep local
-        console.print(f"[yellow]Conflict in {local_path.name}: keeping LOCAL version[/yellow]")
+        # Non-interactive: keep local (show rel path if possible)
+        try:
+            rel = _rel_or_name(local_vault_path, local_path)
+        except Exception:
+            rel = local_path.name
+        console.print(f"[yellow]Conflict in {rel}: keeping LOCAL version[/yellow]")
         console.print(f"  Conflict files saved to {conflicts_dir}")
         return ConflictResolution.KEEP_LOCAL
 
     # Interactive prompt
-    console.print("\nOptions:\n  1. Keep LOCAL\n  2. Keep PEER\n  3. Skip (resolve later)")
+    opt_local = f"Keep LOCAL (keep name/path: { _rel_or_name(local_vault_path, local_path) })"
+    opt_peer  = f"Keep PEER  (adopt name/path: { peer_rel or '(missing)'} )"
+    console.print(f"\nOptions:\n  1. {opt_local}\n  2. {opt_peer}\n  3. Skip (resolve later)")
 
     while True:
         choice = input("\nYour choice [1/2/3]: ").strip()
