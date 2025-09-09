@@ -14,6 +14,7 @@ from cast_core.registry import load_registry, resolve_cast_by_name
 from cast_core.yamlio import parse_cast_file
 
 from cast_sync.conflict import ConflictResolution, handle_conflict
+from cast_sync.rename import RenameSpec, update_links_for_renames
 from cast_sync.index import EphemeralIndex, build_ephemeral_index
 
 logger = logging.getLogger(__name__)
@@ -410,7 +411,20 @@ class HorizontalSync:
 
         # At this point digests are aligned to baseline, but we may still have a path mismatch.
         if local_rec["relpath"] != peer_rec["relpath"]:
-            return SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.RENAME_LOCAL
+            if mode == "live":
+                # Live peers should adopt the local shape.
+                return SyncDecision.RENAME_PEER
+            else:
+                # WATCH peers must not force local renames if we have any LIVE peers.
+                # Keep local shape authoritative when propagation is possible elsewhere.
+                has_any_live = any(
+                    (m == "live" and n != self.config.cast_name)
+                    for n, m in local_rec.get("peers", {}).items()
+                )
+                if has_any_live:
+                    return SyncDecision.NO_OP
+                # If *all* peers are watch-only, allow local-to-peer shape alignment.
+                return SyncDecision.RENAME_LOCAL
 
         return SyncDecision.NO_OP
 
@@ -823,13 +837,13 @@ class HorizontalSync:
                         before = plan.peer_path
                         after = self._safe_move(plan.peer_path, plan.rename_to, provenance="LOCAL")
                         # Compute paths relative to the peer's vault, defensively.
+                        entry = resolve_cast_by_name(plan.peer_name)
+                        base = (
+                            (plan.peer_root / entry.vault_location)
+                            if (entry and plan.peer_root)
+                            else None
+                        )
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (
-                                (plan.peer_root / entry.vault_location)
-                                if (entry and plan.peer_root)
-                                else None
-                            )
                             _from = str(before.relative_to(base)) if base else before.name
                             _to = str(after.relative_to(base)) if base else after.name
                         except Exception:
@@ -845,6 +859,19 @@ class HorizontalSync:
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
                         )
+                        # Cascade: update links across the peer's vault that point to the renamed file
+                        links_info = ""
+                        try:
+                            if base is not None:
+                                rep = update_links_for_renames(
+                                    base, [RenameSpec(_from, _to)],
+                                    flip_reversed=False,  # trust direction coming from the plan
+                                )
+                                if rep.total_replacements > 0:
+                                    links_info = f" · links: {rep.total_replacements} in {rep.files_changed} file(s)"
+                        except Exception:
+                            # Best‑effort; link rewrites should never break the sync flow
+                            links_info = ""
                         # summary
                         try:
                             local_rel = str(plan.local_path.relative_to(self.vault_path))
@@ -852,7 +879,7 @@ class HorizontalSync:
                             local_rel = plan.local_path.name
                         self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
                         self.summary.items.append(
-                            SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel, _to, f"peer: {_from} → {_to}")
+                            SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel, _to, f"peer: {_from} → {_to}{links_info}")
                         )
 
                 elif plan.decision == SyncDecision.RENAME_LOCAL:
@@ -878,9 +905,20 @@ class HorizontalSync:
                             plan.peer_digest or plan.local_digest,
                             plan.peer_root,
                         )
+                        # Cascade: update links across *local* vault that point to the renamed file
+                        links_info = ""
+                        try:
+                            rep = update_links_for_renames(
+                                self.vault_path, [RenameSpec(_from, _to)],
+                                flip_reversed=False,  # trust direction coming from the plan
+                            )
+                            if rep.total_replacements > 0:
+                                links_info = f" · links: {rep.total_replacements} in {rep.files_changed} file(s)"
+                        except Exception:
+                            links_info = ""
                         self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
                         self.summary.items.append(
-                            SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}")
+                            SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}{links_info}")
                         )
 
                 elif plan.decision == SyncDecision.CONFLICT:

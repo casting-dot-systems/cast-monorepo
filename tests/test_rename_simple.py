@@ -5,19 +5,26 @@ def test_rename_logic():
     """Test the rename decision logic without importing the full module."""
 
     # Simulate the decision logic from _decide_sync
-    def decide_rename(local_relpath, peer_relpath, local_digest, peer_digest, mode):
+    def decide_rename(local_relpath, peer_relpath, local_digest, peer_digest, mode, has_any_live=True):
         """Simplified rename decision logic."""
         if local_digest == peer_digest:  # Same content
             if local_relpath != peer_relpath:  # Different paths
-                return "rename_peer" if mode == "live" else "rename_local"
+                if mode == "live":
+                    return "rename_peer"
+                # Watch peers should not force local rename when any live peers exist
+                return "no_op" if has_any_live else "rename_local"
         return "no_op"
 
     # Test case 1: Same content, different paths, live mode
     result = decide_rename("Notes/Test.md", "Projects/Test.md", "abc123", "abc123", "live")
     assert result == "rename_peer", f"Expected rename_peer, got {result}"
 
-    # Test case 2: Same content, different paths, watch mode
-    result = decide_rename("Notes/Test.md", "Projects/Test.md", "abc123", "abc123", "watch")
+    # Test case 2: Same content, different paths, watch mode (with a live peer elsewhere)
+    result = decide_rename("Notes/Test.md", "Projects/Test.md", "abc123", "abc123", "watch", has_any_live=True)
+    assert result == "no_op", f"Expected no_op, got {result}"
+
+    # Test case 2b: All peers are watch-only → allow local alignment to a watch peer
+    result = decide_rename("Notes/Test.md", "Projects/Test.md", "abc123", "abc123", "watch", has_any_live=False)
     assert result == "rename_local", f"Expected rename_local, got {result}"
 
     # Test case 3: Same content, same paths

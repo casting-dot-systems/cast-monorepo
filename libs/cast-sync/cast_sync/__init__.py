@@ -3,6 +3,7 @@
 from cast_sync.conflict import ConflictResolution, handle_conflict
 from cast_sync.hsync import HorizontalSync, SyncDecision, SyncPlan
 from cast_sync.index import build_ephemeral_index
+from cast_sync.rename import RenameSpec, LinkRewriteReport, update_links_for_renames
 
 __all__ = [
     "HorizontalSync",
@@ -11,6 +12,10 @@ __all__ = [
     "ConflictResolution",
     "handle_conflict",
     "build_ephemeral_index",
+    # rename utils
+    "RenameSpec",
+    "LinkRewriteReport",
+    "update_links_for_renames",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

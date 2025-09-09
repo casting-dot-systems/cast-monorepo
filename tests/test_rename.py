@@ -31,12 +31,12 @@ def test_rename_decision_detection():
             decision = SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.RENAME_LOCAL
             assert decision == SyncDecision.RENAME_PEER
 
-    # Test watch mode
+    # Test watch mode (path mismatch should NOT force local rename when semantics are watch-only)
     mode = "watch"
     if local_rec["digest"] == peer_rec["digest"]:
         if local_rec["relpath"] != peer_rec["relpath"]:
-            decision = SyncDecision.RENAME_PEER if mode == "live" else SyncDecision.RENAME_LOCAL
-            assert decision == SyncDecision.RENAME_LOCAL
+            decision = SyncDecision.NO_OP
+            assert decision == SyncDecision.NO_OP
 
 
 def test_safe_dest_collision_avoidance():
