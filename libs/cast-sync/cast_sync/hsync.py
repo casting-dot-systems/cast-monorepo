@@ -15,6 +15,7 @@ from cast_core.yamlio import parse_cast_file
 
 from cast_sync.conflict import ConflictResolution, handle_conflict
 from cast_sync.index import EphemeralIndex, build_ephemeral_index
+from cast_sync.rename_cascade import apply_rename_cascade
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,18 @@ class HorizontalSync:
                 f.write(json.dumps(payload, ensure_ascii=False) + os.linesep)
         except Exception as e:
             logger.debug(f"Failed to write sync event log: {e}")
+
+    def _rename_cascade(self, vault_path: Path, old_rel: str, new_rel: str, scope: str) -> None:
+        """
+        Best-effort link rewrite after a rename. Logs an event with changed file count.
+        """
+        try:
+            n = apply_rename_cascade(vault_path, old_rel, new_rel)
+            if n:
+                self._log_event("rename_cascade", old=old_rel, new=new_rel, scope=scope, files=n)
+                logger.info(f"Rename cascade ({scope}): updated {n} file(s)")
+        except Exception as e:
+            logger.warning(f"Rename cascade failed ({scope}): {e}")
 
     def _read_cast_id(self, path: Path) -> str | None:
         try:
@@ -811,6 +824,11 @@ class HorizontalSync:
                             except Exception:
                                 _from, _to = before.name, after.name
                             self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                            # Cascade rename in LOCAL vault
+                            try:
+                                self._rename_cascade(self.vault_path, _from, _to, f"local adopt({plan.peer_name})")
+                            except Exception:
+                                pass
                             self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
                             self.summary.items.append(
                                 SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}")
@@ -869,6 +887,12 @@ class HorizontalSync:
                             except Exception:
                                 _from, _to = before.name, after.name
                             self._log_event("rename_peer", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                            # Cascade rename in PEER vault
+                            if peer_vault_base:
+                                try:
+                                    self._rename_cascade(peer_vault_base, _from, _to, f"peer {plan.peer_name} adopt(LOCAL)")
+                                except Exception:
+                                    pass
                             self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
                             self.summary.items.append(SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel_now, _to, f"peer: {_from} → {_to}"))
                         self._safe_copy(
@@ -973,6 +997,12 @@ class HorizontalSync:
                             cast_id=plan.cast_id,
                             **{"from": _from, "to": _to, "peer": plan.peer_name},
                         )
+                        # Cascade rename in PEER vault
+                        try:
+                            entry = resolve_cast_by_name(plan.peer_name)
+                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            if base: self._rename_cascade(base, _from, _to, f"peer {plan.peer_name} (rename_peer)")
+                        except Exception: pass
                         self._update_baseline_both(
                             plan.cast_id,
                             plan.peer_name,
@@ -1007,6 +1037,10 @@ class HorizontalSync:
                             cast_id=plan.cast_id,
                             **{"from": _from, "to": _to, "peer": plan.peer_name},
                         )
+                        # Cascade rename in LOCAL vault
+                        try:
+                            self._rename_cascade(self.vault_path, _from, _to, "local (rename_local)")
+                        except Exception: pass
                         plan.local_path = after
                         self._update_baseline_both(
                             plan.cast_id,
@@ -1058,6 +1092,12 @@ class HorizontalSync:
                                 except Exception:
                                     _from, _to = before.name, after.name
                                 self._log_event("rename_peer", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                                # Cascade rename in PEER vault
+                                try:
+                                    entry = resolve_cast_by_name(plan.peer_name)
+                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                    if base: self._rename_cascade(base, _from, _to, f"peer {plan.peer_name} (conflict KEEP_LOCAL)")
+                                except Exception: pass
                                 self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
                                 self.summary.items.append(SummaryItem("rename_peer", plan.cast_id, plan.peer_name, local_rel_now, _to, f"peer: {_from} → {_to}"))
                         if plan.local_path.exists():
@@ -1102,6 +1142,10 @@ class HorizontalSync:
                                 except Exception:
                                     _from, _to = before.name, after.name
                                 self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
+                                # Cascade rename in LOCAL vault
+                                try:
+                                    self._rename_cascade(self.vault_path, _from, _to, "local (conflict KEEP_PEER)")
+                                except Exception: pass
                                 self.summary.counts["rename_local"] = self.summary.counts.get("rename_local", 0) + 1
                                 self.summary.items.append(SummaryItem("rename_local", plan.cast_id, plan.peer_name, _to, None, f"local: {_from} → {_to}"))
                         if plan.peer_path:
