@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cast-sync"
-version = "0.1.3"
+version = "0.1.4"
 description = "Sync engine for Cast - 3-way sync and conflict handling"
 requires-python = ">=3.10"
 dependencies = [

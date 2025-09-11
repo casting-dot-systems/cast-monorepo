@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from tests.framework import Sandbox, mk_note, read_file, write_file
 
 
@@ -83,3 +84,61 @@ def test_rename_conflict_keep_peer_adopts_peer_path(tmp_path):
         assert not (A.root / a_new_rel).exists()
         assert (A.root / b_new_rel).exists()
         assert read_file(A.root / b_new_rel) == read_file(B.root / b_new_rel)
+
+
+def test_watch_peer_deletion_does_not_delete_local(tmp_path):
+    """
+    If a WATCH peer deletes its copy, local should NOT be deleted; baseline should be cleared.
+    """
+    with Sandbox(tmp_path) as sb:
+        A = sb.create_vault("A")
+        B = sb.create_vault("B")
+
+        rel = A.vault_rel("watch_del.md")
+        cid = "12121212-aaaa-bbbb-cccc-121212121212"
+
+        # Same file both sides; mark B as WATCH
+        write_file(A.root / rel, mk_note(cid, "W", "X\n", peers=["A", "B (watch)"]))
+        write_file(B.root / rel, mk_note(cid, "W", "X\n", peers=["A", "B (watch)"]))
+        sb.hsync(A)  # establish baseline
+
+        # WATCH peer deletes its copy
+        (B.root / rel).unlink()
+
+        # Sync from A. Local must NOT be deleted.
+        sb.hsync(A)
+        assert (A.root / rel).exists(), "Local should not be deleted by WATCH peer deletion"
+        assert not (B.root / rel).exists(), "Peer deletion remains (we do not recreate for WATCH)"
+
+        # Baseline cleared for that pair (so we don't churn)
+        state = json.loads((A.root / ".cast" / "syncstate.json").read_text(encoding="utf-8"))
+        assert cid not in state.get("baselines", {}), "baseline should be cleared for WATCH deletion"
+
+
+def test_local_deletion_does_not_delete_watch_peer(tmp_path):
+    """
+    If local deletes the file, a WATCH peer must NOT be deleted.
+    Baseline should be cleared so future syncs don't keep scheduling a delete.
+    """
+    with Sandbox(tmp_path) as sb:
+        A = sb.create_vault("A")
+        B = sb.create_vault("B")
+
+        rel = A.vault_rel("keep_on_watch_peer.md")
+        cid = "34343434-dddd-eeee-ffff-343434343434"
+
+        # Create both sides; B is WATCH
+        write_file(A.root / rel, mk_note(cid, "K", "Body\n", peers=["A", "B (watch)"]))
+        write_file(B.root / rel, mk_note(cid, "K", "Body\n", peers=["A", "B (watch)"]))
+        sb.hsync(A)  # baseline
+
+        # Local delete
+        (A.root / rel).unlink()
+
+        # Sync from A → B must NOT be deleted
+        sb.hsync(A)
+        assert (B.root / rel).exists(), "WATCH peer must not be deleted when local deletes"
+
+        # Baseline cleared (so we don't attempt delete on future runs)
+        s_local = json.loads((A.root / ".cast" / "syncstate.json").read_text(encoding="utf-8"))
+        assert cid not in s_local.get("baselines", {}), "baseline cleared after local delete + WATCH peer"

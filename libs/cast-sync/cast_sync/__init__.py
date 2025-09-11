@@ -13,4 +13,4 @@ __all__ = [
     "build_ephemeral_index",
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"

@@ -82,6 +82,10 @@ def test_scenario(tmp_path):
 ## Patterns you'll often need
 
 1. **Watch mode**: Include `"VaultX (watch)"` in `cast-vaults`. Pushes to watch peers are NO‑OPs.
+   - **Deletions & WATCH** (now enforced):
+     - If a WATCH peer deletes its copy, local is **not** deleted; baselines are cleared for that pair.
+     - If local deletes the file, WATCH peers are **not** deleted; baselines are cleared for that pair.
+     - LIVE peers retain previous deletion behavior (propagate/accept based on baseline digests).
 2. **Interactive conflicts**: Call `sb.hsync(vault, non_interactive=False, input="2\n")` to "Keep PEER".
 3. **Limit-file**: `sb.hsync(vault, file=str(relpath))` ensures no deletion pass side effects on other files.
 4. **Cascade**: By default `hsync` cascades; assertions can be placed on peers' peers.

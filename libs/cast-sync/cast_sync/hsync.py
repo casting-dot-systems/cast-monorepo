@@ -431,8 +431,9 @@ class HorizontalSync:
                 if local_moved:
                     # Peer missing but only local renamed since baseline → create on peer at new path
                     return SyncDecision.CREATE_PEER if mode == "live" else SyncDecision.NO_OP
-                # Otherwise: accept peer deletion if local unchanged
-                return SyncDecision.DELETE_LOCAL
+                # Otherwise: treat as peer deletion if the peer is LIVE.
+                # WATCH peers must not trigger destructive local deletes.
+                return SyncDecision.DELETE_LOCAL if mode == "live" else SyncDecision.NO_OP
             # content diverged but peer missing → conflict
             return SyncDecision.CONFLICT
 
@@ -684,8 +685,29 @@ class HorizontalSync:
                     self._log_event("baseline_cleared_orphan", cast_id=cast_id, peer=peer_name)
                     continue
 
+                # Determine peer mode from its own copy (local is missing).
+                # If the peer lists itself in cast-vaults as (watch), respect that and do not delete it.
+                peer_mode = "live"
+                try:
+                    peers_map = peer_rec.get("peers") or {}
+                    if isinstance(peers_map, dict):
+                        peer_mode = peers_map.get(peer_name, "live")
+                except Exception:
+                    peer_mode = "live"
+
                 if peer_digest == baseline_digest:
-                    decision = SyncDecision.DELETE_PEER  # propagate local deletion
+                    if peer_mode == "live":
+                        # Local deleted, peer unchanged since baseline → propagate deletion to LIVE peer
+                        decision = SyncDecision.DELETE_PEER
+                    else:
+                        # WATCH peer: do NOT delete; clear baseline both sides and skip planning an action
+                        self._clear_baseline_both(cast_id, peer_name, peer_vault_path.parent)
+                        self._log_event(
+                            "baseline_cleared_watch_skip",
+                            cast_id=cast_id,
+                            peer=peer_name,
+                        )
+                        continue
                 else:
                     decision = SyncDecision.CONFLICT  # local missing vs peer changed
 
