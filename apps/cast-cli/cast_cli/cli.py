@@ -750,21 +750,15 @@ def cbsync(
             if docs_cast_path.exists():
                 root = docs_cast_path
         
-        # Case 2: We're in docs/cast of a codebase
-        elif (str(root.parent.name).lower() == "cast" 
-              and str(root.parent.parent.name).lower() == "docs"):
-            # Check if parent's parent has codebase config
-            potential_codebase_root = root.parent.parent
-            parent_config_path = potential_codebase_root / ".cast" / "config.yaml"
-            if parent_config_path.exists():
-                try:
-                    with open(parent_config_path, encoding="utf-8") as f:
-                        parent_cfg = yaml.load(f) or {}
-                        if str(parent_cfg.get("cast-kind") or "").lower() == "codebase":
-                            codebase_root = potential_codebase_root
-                            is_codebase_ctx = True
-                except Exception:
-                    pass
+        # Case 2: We started in docs/cast of a codebase, but get_current_root() walked up
+        elif (Path.cwd().name.lower() == "cast" 
+              and Path.cwd().parent.name.lower() == "docs"
+              and Path.cwd().parent.parent == root):
+            # We started in docs/cast but found the codebase root
+            if str(cfg.get("cast-kind") or "").lower() == "codebase":
+                codebase_root = root
+                is_codebase_ctx = True
+                # We're already in docs/cast, so don't change root
 
         if codebase is None and is_codebase_ctx:
             # Find the registered codebase that matches this root

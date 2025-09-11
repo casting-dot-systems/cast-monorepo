@@ -352,7 +352,17 @@ class CodebaseSync:
             rrec = remote_index.get_by_id(cid)
             baseline = self.syncstate.baselines.get(cid, {}).get(peer_key)
             decision = self._decide(cid, lrec, rrec, baseline)
-            local_path = self.vault_path / (lrec["relpath"] if lrec else (baseline.rel if baseline and baseline.rel else f"{cid}.md"))
+            # For CREATE_LOCAL operations, prefer the remote filename over cast-id
+            if lrec:
+                local_path = self.vault_path / lrec["relpath"]
+            elif baseline and baseline.rel:
+                local_path = self.vault_path / baseline.rel
+            elif rrec and decision == CBDecision.CREATE_LOCAL:
+                # Use remote filename when creating local file
+                local_path = self.vault_path / rrec["relpath"]
+            else:
+                # Fall back to cast-id filename
+                local_path = self.vault_path / f"{cid}.md"
             remote_path = remote_vault / (rrec["relpath"] if rrec else (baseline.peer_rel if baseline and baseline.peer_rel else (lrec["relpath"] if lrec else f"{cid}.md")))
             rename_to = None
             if decision == CBDecision.RENAME_REMOTE and lrec:
