@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cast-tui"
+version = "0.1.0"
+description = "Minimal, extensible terminal (TUI) framework with fuzzy autocomplete and plugin API"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0.43",
+    "rich>=13.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0"
+]

@@ -3,13 +3,18 @@ name = "cast-monorepo"
 version = "0.1.0"
 description = "Cast Sync monorepo"
 requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0.52",
+    "rich>=14.1.0",
+]
 
 [tool.uv.workspace]
 members = [
     "libs/cast-core",
     "libs/cast-sync", 
     "libs/cast-git",
-    "apps/cast-cli"
+    "apps/cast-cli",
+    "apps/cast-tui"
 ]
 
 [tool.uv]
