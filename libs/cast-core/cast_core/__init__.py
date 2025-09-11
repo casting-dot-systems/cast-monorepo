@@ -17,9 +17,15 @@ from cast_core.registry import (
     resolve_cast_by_name,
     save_registry,
     unregister_cast,
+    # codebases
+    list_codebases,
+    register_codebase,
+    resolve_codebase_by_name,
+    unregister_codebase,
 )
 from cast_core.yamlio import (
     ensure_cast_fields,
+    ensure_codebase_membership,
     extract_cast_fields,
     parse_cast_file,
     reorder_cast_fields,
@@ -39,6 +45,11 @@ __all__ = [
     "resolve_cast_by_name",
     "resolve_cast_by_id",
     "unregister_cast",
+    # codebases
+    "list_codebases",
+    "register_codebase",
+    "resolve_codebase_by_name",
+    "unregister_codebase",
     "CastConfig",
     "FileRec",
     "SyncState",
@@ -46,8 +57,9 @@ __all__ = [
     "parse_cast_file",
     "extract_cast_fields",
     "ensure_cast_fields",
+    "ensure_codebase_membership",
     "reorder_cast_fields",
     "write_cast_file",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

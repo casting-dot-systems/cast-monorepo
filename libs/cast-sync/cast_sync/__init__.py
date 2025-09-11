@@ -3,6 +3,7 @@
 from cast_sync.conflict import ConflictResolution, handle_conflict
 from cast_sync.hsync import HorizontalSync, SyncDecision, SyncPlan
 from cast_sync.index import build_ephemeral_index
+from cast_sync.cbsync import CodebaseSync
 
 __all__ = [
     "HorizontalSync",
@@ -11,6 +12,7 @@ __all__ = [
     "ConflictResolution",
     "handle_conflict",
     "build_ephemeral_index",
+    "CodebaseSync",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

@@ -12,9 +12,15 @@ from cast_core import (
     register_cast,
     resolve_cast_by_name,
     unregister_cast,
+    # codebases
+    list_codebases,
+    register_codebase,
+    resolve_codebase_by_name,
+    unregister_codebase,
 )
 from cast_core.filelock import cast_lock
 from cast_sync import HorizontalSync, build_ephemeral_index
+from cast_sync import CodebaseSync
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
@@ -22,6 +28,9 @@ from ruamel.yaml import YAML
 
 # Initialize
 app = typer.Typer(help="Cast Sync - Synchronize Markdown files across local casts")
+# codebase sub-app
+cb_app = typer.Typer(help="Manage Codebases (install/list/uninstall)")
+app.add_typer(cb_app, name="codebase")
 # Subcommands (e.g., gdoc) get added at bottom to avoid circular imports.
 console = Console()
 yaml = YAML()
@@ -246,7 +255,7 @@ def hsync(
         False, "--non-interactive", help="Don't prompt for conflicts"
     ),
     cascade: bool = typer.Option(
-        True, "--cascade/--no-cascade", help="Also run hsync for peers (and peers of peers)"
+        False, "--cascade/--no-cascade", help="Also run hsync for peers (and peers of peers)"
     ),
     debug: bool = typer.Option(
         False, "--debug", help="Show a detailed, legible execution plan (includes NO_OP)"
@@ -462,6 +471,13 @@ def doctor():
                                 f"Peer '{peer}' not found in machine registry. "
                                 "Install that peer with 'cast install .' in its root."
                             )
+                    # NEW: codebase checks
+                    for cb in sorted(idx.all_codebases()):
+                        if not resolve_codebase_by_name(cb):
+                            warnings.append(
+                                f"Codebase '{cb}' not found in machine registry. "
+                                "Install it with 'cast codebase install <path> -n {cb}'."
+                            )
         except Exception as e:
             warnings.append(f"Peer check skipped due to error: {e}")
 
@@ -532,6 +548,314 @@ def report():
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(2) from e
+
+
+# ----------------------- Codebase CLI -----------------------
+
+@cb_app.command("install")
+def cb_install(
+    path: str = typer.Argument(..., help="Path to a Codebase root (must contain docs/cast)"),
+    name: str = typer.Option(..., "--name", "-n", help="Codebase name (non-space, e.g. nuu-core)"),
+    to_cast: str | None = typer.Option(
+        None, "--to-cast",
+        help="Associate this codebase with the CAST named <to-cast>. Enables 'cast cbsync' inside the codebase."
+    ),
+):
+    try:
+        oc = None
+        if to_cast:
+            ent = resolve_cast_by_name(to_cast)
+            if not ent:
+                console.print(f"[red]Cast not found:[/red] '{to_cast}'. Install/register the cast first.")
+                raise typer.Exit(2)
+            oc = ent.name  # sanitize to the resolved canonical name
+        entry = register_codebase(_sanitize_name(name), Path(path), origin_cast=oc)
+        console.print(
+            f"[green]✔[/green] Installed codebase: [bold]{entry.name}[/bold]\n"
+            f"  root: {entry.root}\n"
+            f"  cast: {entry.origin_cast or '—'}"
+        )
+    except Exception as e:
+        console.print(f"[red]Install failed:[/red] {e}")
+        raise typer.Exit(2) from e
+
+@cb_app.command("list")
+def cb_list(json_out: bool = typer.Option(False, "--json", help="Output as JSON")):
+    try:
+        cbs = list_codebases()
+        if json_out:
+            print(json.dumps({"codebases": [
+                {"name": c.name, "root": str(c.root), "origin_cast": c.origin_cast} for c in cbs
+            ]}, indent=2))
+            return
+        console.rule("[bold cyan]Installed Codebases[/bold cyan]")
+        if not cbs:
+            console.print("[yellow]No codebases installed[/yellow]")
+            return
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("Name")
+        t.add_column("Root")
+        t.add_column("Cast")
+        for c in cbs:
+            t.add_row(c.name, str(c.root), c.origin_cast or "—")
+        console.print(t)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(2) from e
+
+@cb_app.command("uninstall")
+def cb_uninstall(identifier: str = typer.Argument(..., help="Codebase name or root path")):
+    try:
+        removed = unregister_codebase(name=identifier)
+        if not removed:
+            p = Path(identifier).expanduser()
+            if p.exists():
+                removed = unregister_codebase(root=p.resolve())
+        if not removed:
+            console.print(f"[red]Uninstall failed:[/red] No installed codebase matched '{identifier}'")
+            raise typer.Exit(2)
+        console.print(f"[green]✔[/green] Uninstalled codebase: [bold]{removed.name}[/bold]\n  root: {removed.root}")
+    except Exception as e:
+        console.print(f"[red]Uninstall failed:[/red] {e}")
+        raise typer.Exit(2) from e
+
+
+@cb_app.command("init")
+def cb_init(
+    name: str = typer.Option(None, "--name", "-n", help="Codebase name (defaults to directory name)"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing docs/cast directory"),
+    to_cast: str | None = typer.Option(
+        None, "--to-cast",
+        help="Default target CAST for this codebase (used when running 'cast cbsync' inside the codebase)"
+    ),
+):
+    """Initialize a codebase cast directory at docs/cast."""
+    try:
+        current_dir = Path.cwd()
+        cast_dir = current_dir / "docs" / "cast"
+        
+        # Determine codebase name
+        if name is None:
+            name = _sanitize_name(current_dir.name)
+        else:
+            name = _sanitize_name(name)
+        
+        # Check if docs/cast already exists
+        if cast_dir.exists() and not force:
+            console.print(f"[yellow]docs/cast already exists. Use --force to overwrite.[/yellow]")
+            raise typer.Exit(1)
+        
+        # Create docs directory if it doesn't exist
+        docs_dir = current_dir / "docs"
+        docs_dir.mkdir(exist_ok=True)
+        
+        # Create / reset docs/cast
+        if cast_dir.exists() and force:
+            import shutil
+            shutil.rmtree(cast_dir)
+        
+        cast_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create .cast directory with standard config (in codebase root, not docs/cast)
+        cast_config_dir = current_dir / ".cast"
+        cast_config_dir.mkdir(exist_ok=True)
+        
+        # Create config.yaml (standard keys + explicit kind)
+        import uuid as _uuid
+        config = {
+            "cast-version": 1,
+            "cast-id": str(_uuid.uuid4()),
+            "cast-name": name,
+            "cast-kind": "codebase",
+        }
+        # Optional: record the origin cast for this codebase
+        if to_cast:
+            ent = resolve_codebase_by_name  # dummy reference to avoid linter remove import
+            # validate the cast exists (best-effort)
+            from cast_core.registry import resolve_cast_by_name as _res_cast
+            rc = _res_cast(to_cast)
+            if not rc:
+                console.print(f"[yellow]Warning:[/yellow] Cast '{to_cast}' is not installed yet. You can set it later with 'cast codebase install --to-cast'.")
+            config["origin-cast"] = to_cast
+        config_file = cast_config_dir / "config.yaml"
+        with open(config_file, "w", encoding="utf-8") as f:
+            yaml.dump(config, f)
+        
+        # Create empty syncstate.json
+        syncstate_file = cast_config_dir / "syncstate.json"
+        syncstate_file.write_text('{"baselines": {}, "last_sync": null}\n', encoding="utf-8")
+        
+        # Vault for a codebase is docs/cast (no nested "Cast")
+        vault_dir = cast_dir
+        
+        # Create README in docs/cast
+        readme_content = f"""# {name} Codebase Cast
+
+This is the **docs/cast** vault for the `{name}` codebase.
+
+Files in this directory will be synchronized with other Casts using `cast cbsync`.
+"""
+        readme_file = vault_dir / "README.md"
+        readme_file.write_text(readme_content, encoding="utf-8")
+        
+        console.print(f"[green]✔[/green] Initialized codebase cast: [bold]{name}[/bold]")
+        console.print(f"  Cast directory: {cast_dir}")
+        console.print(f"  Vault directory: {vault_dir}")
+        console.print(f"\nNext steps:")
+        console.print(f"  1. Add files under {vault_dir} (agents may write plain Markdown — no YAML required).")
+        console.print(f"  2. Register this codebase: [cyan]cast codebase install . --name {name}"
+                      + (f" --to-cast {to_cast}[/cyan]" if to_cast else "[/cyan]"))
+        console.print(f"  3. From inside this codebase, run: [cyan]cast cbsync[/cyan]  (syncs to the linked cast)")
+        
+    except Exception as e:
+        console.print(f"[red]Init failed:[/red] {e}")
+        raise typer.Exit(2) from e
+
+
+@app.command()
+def cbsync(
+    codebase: str | None = typer.Argument(None, help="Codebase name (registered). Omit when running inside a codebase to sync outward."),
+    file: str | None = typer.Option(None, "--file", help="Sync only this cast-id or path"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Plan only"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Resolve conflicts with KEEP_LOCAL"),
+    debug: bool = typer.Option(False, "--debug", help="Show an execution plan"),
+):
+    """Sync between this Cast and a Codebase's docs/cast (no hsync)."""
+    try:
+        root = get_current_root()
+
+        # Heuristic: are we *inside a codebase vault* (docs/cast)? If so and no codebase arg
+        # was provided, sync this codebase outward to all installed casts.
+        config_path = root / ".cast" / "config.yaml"
+        cfg = {}
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                try:
+                    cfg = yaml.load(f) or {}
+                except Exception:
+                    cfg = {}
+
+        # Determine if we're in a codebase context and find the codebase
+        original_root = root
+        codebase_root = None
+        is_codebase_ctx = False
+        
+        # Case 1: Current root is a codebase root (has cast-kind=codebase)
+        if str(cfg.get("cast-kind") or "").lower() == "codebase":
+            codebase_root = root
+            is_codebase_ctx = True
+            # Switch to docs/cast for actual operations
+            docs_cast_path = root / "docs" / "cast"
+            if docs_cast_path.exists():
+                root = docs_cast_path
+        
+        # Case 2: We're in docs/cast of a codebase
+        elif (str(root.parent.name).lower() == "cast" 
+              and str(root.parent.parent.name).lower() == "docs"):
+            # Check if parent's parent has codebase config
+            potential_codebase_root = root.parent.parent
+            parent_config_path = potential_codebase_root / ".cast" / "config.yaml"
+            if parent_config_path.exists():
+                try:
+                    with open(parent_config_path, encoding="utf-8") as f:
+                        parent_cfg = yaml.load(f) or {}
+                        if str(parent_cfg.get("cast-kind") or "").lower() == "codebase":
+                            codebase_root = potential_codebase_root
+                            is_codebase_ctx = True
+                except Exception:
+                    pass
+
+        if codebase is None and is_codebase_ctx:
+            # Find the registered codebase that matches this root
+            from cast_core.registry import list_codebases, list_casts
+            cbs = list_codebases()
+            entry = next((cb for cb in cbs if cb.root.resolve() == codebase_root.resolve()), None)
+            if entry is None:
+                console.print("[red]This codebase is not registered.[/red]\n"
+                              "Register it first: [cyan]cast codebase install . --name <name> --to-cast <Cast>[/cyan]")
+                raise typer.Exit(2)
+            codebase_name = entry.name
+
+            # Determine origin cast (registry preferred; fallback to config.yaml 'origin-cast')
+            # Read config from codebase root, not from docs/cast
+            codebase_config_path = codebase_root / ".cast" / "config.yaml"
+            codebase_cfg = {}
+            if codebase_config_path.exists():
+                with open(codebase_config_path, encoding="utf-8") as f:
+                    try:
+                        codebase_cfg = yaml.load(f) or {}
+                    except Exception:
+                        codebase_cfg = {}
+            origin_cast = entry.origin_cast or (codebase_cfg.get("origin-cast") if isinstance(codebase_cfg, dict) else None)
+            if not origin_cast:
+                console.print(
+                    "[red]No origin cast configured for this codebase.[/red]\n"
+                    "Set it with: [cyan]cast codebase install . --name "
+                    f"{codebase_name} --to-cast <CastName>[/cyan]"
+                )
+                raise typer.Exit(2)
+
+            # Resolve the installed cast entry
+            installed = {c.name: c for c in list_casts()}
+            if origin_cast not in installed:
+                console.print(f"[red]Origin cast '{origin_cast}' is not installed on this machine.[/red]")
+                console.print("Install/register it with: [cyan]cast install /path/to/cast[/cyan]")
+                raise typer.Exit(2)
+            target = installed[origin_cast]
+
+            console.rule(f"[bold cyan]Sync codebase → cast[/bold cyan]  ({codebase_name} → {origin_cast})")
+            with cast_lock(target.root):
+                syncer = CodebaseSync(target.root)
+                code = syncer.sync(
+                    codebase_name,
+                    file_filter=file,
+                    dry_run=dry_run,
+                    non_interactive=non_interactive,
+                    debug=debug,
+                )
+            # Summarize similar to below (re‑use the standard block at the end)
+            exit_code = code
+            # Jump to summary printing
+        else:
+            # Normal mode: run from a cast against a named codebase
+            if codebase is None:
+                console.print("[red]Missing CODEBASE argument.[/red] Provide a name, or run inside a codebase vault to sync outward.")
+                raise typer.Exit(2)
+            with cast_lock(root):
+                syncer = CodebaseSync(root)
+                exit_code = syncer.sync(codebase, file_filter=file, dry_run=dry_run, non_interactive=non_interactive, debug=debug)
+        # Summarize like hsync
+        summary = getattr(syncer, "summary", None)
+        if summary:
+            console.rule("[bold]Codebase Sync Summary[/bold]")
+            c = summary.counts
+            pulls = c.get("pull", 0)
+            pushes = c.get("push", 0)
+            created = c.get("create_peer", 0) + c.get("create_local", 0)
+            deletes = c.get("delete_local", 0) + c.get("delete_peer", 0)
+            renames = c.get("rename_local", 0) + c.get("rename_peer", 0)
+            console.print(
+                f"⬇️ pulls: [bold]{pulls}[/bold]   ⬆️ pushes: [bold]{pushes}[/bold]   "
+                f"➕ created: [bold]{created}[/bold]   ✂️ deletions: [bold]{deletes}[/bold]   "
+                f"🔁 renames: [bold]{renames}[/bold]   "
+                f"⚠️ open: [bold]{summary.conflicts_open}[/bold]   ✔️ resolved: [bold]{summary.conflicts_resolved}[/bold]"
+            )
+            if summary.items:
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("Action")
+                table.add_column("File (local)")
+                table.add_column("File (codebase)")
+                table.add_column("Details")
+                for it in summary.items:
+                    table.add_row(it.action, it.local_rel, it.remote_rel or "-", it.detail or "")
+                console.print(table)
+            else:
+                console.print("[dim]No changes.[/dim]")
+        if exit_code != 0:
+            raise typer.Exit(exit_code)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(2) from e
 
 

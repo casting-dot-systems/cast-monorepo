@@ -129,10 +129,16 @@ def build_ephemeral_index(
                         if not keys or keys[0] != "last-updated":
                             need_reorder = True
                     # Enforce canonical cast-* ordering
-                    # Compare current key order to reorder_cast_fields result
+                    # Compare current mapping to reorder_cast_fields result
+                    # (this catches list canonicalization for 'cast-hsync' and 'cast-codebases')
                     reordered = reorder_cast_fields(dict(front_matter))
                     if list(reordered.keys()) != keys:
                         need_reorder = True
+                    else:
+                        if reordered.get("cast-hsync") != front_matter.get("cast-hsync"):
+                            need_reorder = True
+                        if reordered.get("cast-codebases") != front_matter.get("cast-codebases"):
+                            need_reorder = True
                 except Exception:
                     # If we can't inspect order, be conservative and rewrite
                     need_reorder = True

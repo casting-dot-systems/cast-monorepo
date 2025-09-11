@@ -100,3 +100,13 @@ Add small, composable helpers. Follow this approach:
 - For new capabilities (e.g., codebases or vsync), add focused tests under `tests/integration/`.
 
 **Rule of thumb**: tests should read naturally "arrange → act → assert" and always clean up via the framework.
+
+## Codebase sync tests
+
+This repo includes basic `cbsync` tests using `pytest` and isolated registries via `CAST_HOME`.
+They:
+
+1. Register a codebase (`docs/cast`) and a cast.
+2. Create a file with `cast-codebases: [nuu-core]` and run `cbsync` to create the remote copy.
+3. Modify remote → pull to local, modify local → push to remote.
+4. Rename & deletes on both sides.

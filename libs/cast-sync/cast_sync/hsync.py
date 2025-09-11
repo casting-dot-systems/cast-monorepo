@@ -695,12 +695,12 @@ class HorizontalSync:
                     continue
 
                 # Determine peer mode from its own copy (local is missing).
-                # If the peer lists itself in cast-vaults as (watch), respect that and do not delete it.
+                # On the peer's copy, the relationship is keyed by *our* cast name.
                 peer_mode = "live"
                 try:
                     peers_map = peer_rec.get("peers") or {}
                     if isinstance(peers_map, dict):
-                        peer_mode = peers_map.get(peer_name, "live")
+                        peer_mode = peers_map.get(self.config.cast_name, "live")
                 except Exception:
                     peer_mode = "live"
 

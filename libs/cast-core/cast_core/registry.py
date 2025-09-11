@@ -38,7 +38,8 @@ def _now_ts() -> str:
 
 
 def _empty_registry() -> dict[str, Any]:
-    return {"version": REGISTRY_VERSION, "updated_at": "", "casts": {}}
+    # Add top-level 'codebases' map (parallel to 'casts').
+    return {"version": REGISTRY_VERSION, "updated_at": "", "casts": {}, "codebases": {}}
 
 
 def load_registry() -> dict[str, Any]:
@@ -73,6 +74,16 @@ class CastEntry:
     @property
     def cast_path(self) -> Path:
         return self.root / "Cast"
+
+@dataclass
+class CodebaseEntry:
+    """Registered codebase root; docs/cast is the sync mount."""
+    name: str
+    root: Path
+    origin_cast: str | None = None  # single home cast for this codebase
+    @property
+    def docs_cast_path(self) -> Path:
+        return self.root / "docs" / "cast"
 
 
 def _read_cast_config(root: Path) -> tuple[str, str]:
@@ -192,3 +203,103 @@ def unregister_cast(
     reg["casts"] = casts
     save_registry(reg)
     return _entry_from_reg(target_id, payload)
+
+
+# ---------------------- CODEBASE REGISTRY ----------------------
+
+def register_codebase(name: str, root: Path, origin_cast: str | None = None) -> CodebaseEntry:
+    """
+    Register/update a Codebase root in the machine registry.
+      • Unique by name and root path (last write wins).
+      • Validates the expected layout (docs/cast).
+    """
+    name = (name or "").strip()
+    if not name or " " in name:
+        raise ValueError("Codebase name must be a non-space string (e.g., 'nuu-core').")
+    root = root.expanduser().resolve()
+    doc_path = root / "docs" / "cast"
+    cast_config_path = root / ".cast"
+    if not doc_path.exists():
+        # Be strict here; caller can create dirs first for clarity.
+        raise FileNotFoundError(f"Expected path not found: {doc_path} (create it and retry)")
+    if not cast_config_path.exists():
+        # Also require .cast directory in root for new structure
+        raise FileNotFoundError(f"Expected .cast directory not found: {cast_config_path} (run 'cast codebase init' first)")
+
+    # If a cast is specified, make sure it's installed (best-effort validation).
+    if origin_cast:
+        ent = resolve_cast_by_name(origin_cast)
+        if not ent:
+            raise FileNotFoundError(
+                f"Cast '{origin_cast}' not found in registry. Install it first: 'cast install <cast_root>'."
+            )
+
+    reg = load_registry()
+    reg.setdefault("codebases", {})
+
+    # Remove any other entries that share the same name or root
+    to_remove: list[str] = []
+    for cb_name, data in list(reg["codebases"].items()):
+        same_name = (cb_name == name)
+        same_root = (Path(data.get("root", "")).resolve() == root)
+        if same_name or same_root:
+            to_remove.append(cb_name)
+    for cb in to_remove:
+        reg["codebases"].pop(cb, None)
+
+    payload = {"root": str(root)}
+    if origin_cast:
+        payload["origin_cast"] = origin_cast
+    reg["codebases"][name] = payload
+    save_registry(reg)
+    return CodebaseEntry(name=name, root=root, origin_cast=origin_cast)
+
+def list_codebases() -> list[CodebaseEntry]:
+    reg = load_registry()
+    out: list[CodebaseEntry] = []
+    for name, data in reg.get("codebases", {}).items():
+        out.append(CodebaseEntry(
+            name=name,
+            root=Path(data.get("root", "")),
+            origin_cast=data.get("origin_cast")
+        ))
+    return out
+
+def resolve_codebase_by_name(name: str) -> CodebaseEntry | None:
+    reg = load_registry()
+    data = reg.get("codebases", {}).get(name)
+    if not data:
+        return None
+    return CodebaseEntry(
+        name=name,
+        root=Path(data.get("root", "")),
+        origin_cast=data.get("origin_cast")
+    )
+
+def unregister_codebase(*, name: str | None = None, root: Path | None = None) -> CodebaseEntry | None:
+    """
+    Remove a Codebase from the machine registry by name or root.
+    """
+    reg = load_registry()
+    codebases = reg.get("codebases", {})
+    target_name: str | None = None
+
+    if name and name in codebases:
+        target_name = name
+    elif root:
+        root_str = str(root.expanduser().resolve())
+        for cb_name, data in codebases.items():
+            if data.get("root") == root_str:
+                target_name = cb_name
+                break
+    if not target_name:
+        return None
+
+    payload = codebases.pop(target_name)
+    reg["codebases"] = codebases
+    save_registry(reg)
+    return CodebaseEntry(
+        name=target_name,
+        root=Path(payload.get("root", "")),
+        origin_cast=payload.get("origin_cast")
+    )

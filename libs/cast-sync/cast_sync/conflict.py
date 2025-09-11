@@ -77,6 +77,11 @@ def handle_conflict(
 
     # Preview (side-by-side) with YAML front matter awareness
     console = Console()
+    # YAML instance for readable/ordered diffs (must exist before nested functions use it)
+    _yaml = YAML()
+    _yaml.preserve_quotes = True
+    _yaml.default_flow_style = False
+    _yaml.width = 4096
     try:
         local_preview: str = (
             local_content
@@ -102,6 +107,21 @@ def handle_conflict(
             return "LOCAL", (root / "Cast")
 
     cast_name, local_vault_path = _local_cast_info(cast_root)
+
+    def _guess_peer_base(p: Path | None) -> Path | None:
+        """
+        Try to find a sensible base for 'peer_path' so we can render a pretty relative path.
+        Works for both CAST ('.../Cast/...') and CODEBASE ('.../docs/cast/...').
+        """
+        if p is None:
+            return None
+        for anc in [p] + list(p.parents):
+            nm = anc.name.lower()
+            if nm == "cast":
+                # catches both '/Cast' and '/docs/cast'
+                return anc
+        return p.parent
+
     def _rel_or_name(base: Path | None, p: Path | None) -> str:
         if base is None or p is None: return p.name if p else ""
         try: return str(p.relative_to(base))
@@ -126,10 +146,7 @@ def handle_conflict(
         body = text[m.end() :]
         return yaml_text, body
 
-    _yaml = YAML()
-    _yaml.preserve_quotes = True
-    _yaml.default_flow_style = False
-    _yaml.width = 4096
+    # (already initialized above)
 
     def _canonicalize_yaml_for_diff(yaml_text: str) -> str:
         """
@@ -324,7 +341,7 @@ def handle_conflict(
         peer_title = None
         if peer_path:
             try:
-                base = (cast_root.parent / "Cast") if cast_root else None  # best-effort
+                base = _guess_peer_base(peer_path)
                 peer_rel = _rel_or_name(base, peer_path)
             except Exception:
                 peer_rel = peer_path.name

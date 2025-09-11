@@ -22,6 +22,8 @@ from prompt_toolkit.key_binding import KeyBindings
 
 from cast_tui import TerminalContext, Command, Plugin
 from cast_sync import build_ephemeral_index, HorizontalSync
+from cast_sync import CodebaseSync
+from cast_core.registry import list_codebases
 from cast_core.yamlio import parse_cast_file
 
 
@@ -227,7 +229,7 @@ def _sync(console: Console, cctx: CastContext, file_token: Optional[str] = None,
     code = hs.sync(
         file_filter=filt,
         non_interactive=non_interactive,
-        cascade=True,
+        cascade=False,
         dry_run=False,
         debug=False,
     )
@@ -298,6 +300,16 @@ class CastTUIPlugin(Plugin):
             name="peers",
             description="List peers referenced in cast",
             handler=lambda c, a: self._cmd_peers(c, a),
+        ))
+        ctx.app.register_command(Command(
+            name="codebases",
+            description="List codebases (referenced vs installed)",
+            handler=lambda c, a: self._cmd_codebases(c, a),
+        ))
+        ctx.app.register_command(Command(
+            name="cbsync",
+            description="Sync with a codebase: cbsync <name> [<file>]",
+            handler=lambda c, a: self._cmd_cbsync(c, a),
         ))
 
         # Default command is "open"
@@ -382,6 +394,39 @@ class CastTUIPlugin(Plugin):
         for p in peers:
             t.add_row(p)
         ctx.console.print(t)
+
+    def _cmd_codebases(self, ctx: TerminalContext, _args: list[str]) -> None:
+        idx = build_ephemeral_index(self._cast.root, self._cast.vault, fixup=False)
+        referenced = sorted(idx.all_codebases())
+        installed = {c.name: c for c in list_codebases()}
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("Codebase")
+        t.add_column("Installed", justify="center")
+        t.add_column("Root")
+        t.add_column("Cast")
+        names = sorted(set(referenced) | set(installed.keys()))
+        if not names:
+            ctx.console.print("[dim]No codebases found.[/dim]")
+            return
+        for name in names:
+            ent = installed.get(name)
+            t.add_row(name, "✔" if ent else "—", str(ent.root) if ent else "", getattr(ent, "origin_cast", None) or "")
+        ctx.console.print(t)
+
+    def _cmd_cbsync(self, ctx: TerminalContext, args: list[str]) -> None:
+        if not args:
+            ctx.console.print("[yellow]Usage:[/yellow] cbsync <codebase> [<file>]")
+            return
+        cb = args[0]
+        file_arg = args[1] if len(args) > 1 else None
+        syncer = CodebaseSync(self._cast.root)
+        code = syncer.sync(cb, file_filter=file_arg, non_interactive=True)
+        if code == 0:
+            ctx.console.print("[green][OK][/green] Codebase sync completed")
+        elif code == 3:
+            ctx.console.print("[yellow][WARN][/yellow] Codebase sync completed with conflicts (skipped)")
+        else:
+            ctx.console.print("[red][ERROR][/red] Codebase sync failed")
 
     # ----- keybinding handlers -----
 
