@@ -1,4 +1,4 @@
-"""Ephemeral index building for vaults."""
+"""Ephemeral index building for casts."""
 
 import logging
 from pathlib import Path
@@ -11,13 +11,13 @@ from cast_core import (
     write_cast_file,
 )
 from cast_core.models import FileRec
-from cast_core.yamlio import parse_vault_entries, reorder_cast_fields
+from cast_core.yamlio import parse_hsync_entries, reorder_cast_fields
 
 logger = logging.getLogger(__name__)
 
 
 class EphemeralIndex:
-    """In-memory index of a vault's cast files."""
+    """In-memory index of a cast's files."""
 
     def __init__(self, vault_path: Path):
         self.vault_path = vault_path
@@ -57,11 +57,11 @@ def build_ephemeral_index(
     root_path: Path, vault_path: Path, fixup: bool = True, limit_file: str | None = None
 ) -> EphemeralIndex:
     """
-    Build an ephemeral index of cast files in a vault.
+    Build an ephemeral index of cast files in a cast folder.
 
     Args:
         root_path: Path to Cast root (contains .cast/)
-        vault_path: Path to vault folder
+        vault_path: Path to cast folder
         fixup: Whether to fix missing cast-id and reorder fields
         limit_file: Optional cast-id or relpath to limit indexing to one file
 
@@ -73,9 +73,9 @@ def build_ephemeral_index(
     # Find all Markdown files
     md_files: list[Path] = []
     if limit_file:
-        # Normalize limit_file to a path relative to the vault, supporting:
-        #  - absolute paths under the vault
-        #  - callers that include the vault folder prefix (e.g. "Cast/foo.md")
+        # Normalize limit_file to a path relative to the cast folder, supporting:
+        #  - absolute paths under the cast folder
+        #  - callers that include the cast folder prefix (e.g. "Cast/foo.md")
         lf = Path(limit_file)
         candidates: list[Path] = []
 
@@ -83,7 +83,7 @@ def build_ephemeral_index(
             try:
                 candidates.append(lf.relative_to(vault_path))
             except ValueError:
-                # Not under this vault; leave empty so we fall back to id lookup.
+                # Not under this cast folder; leave empty so we fall back to id lookup.
                 pass
         else:
             if lf.parts and lf.parts[0] == vault_path.name:
@@ -112,7 +112,13 @@ def build_ephemeral_index(
 
             # Ensure cast fields and canonicalize order (including last-updated first)
             if fixup and front_matter:
-                front_matter, modified = ensure_cast_fields(front_matter, generate_id=True)
+                modified = False
+                # Legacy migration: cast-vaults -> cast-hsync
+                if "cast-vaults" in front_matter and "cast-hsync" not in front_matter:
+                    front_matter["cast-hsync"] = front_matter.pop("cast-vaults")
+                    modified = True
+                front_matter, fields_modified = ensure_cast_fields(front_matter, generate_id=True)
+                modified = modified or fields_modified
 
                 # Determine if YAML needs reordering even if no fields were added
                 need_reorder = False
@@ -142,9 +148,9 @@ def build_ephemeral_index(
             cast_fields = extract_cast_fields(front_matter)
             cast_id = cast_fields.get("cast-id", "")
 
-            # Parse vault entries
-            vault_entries = cast_fields.get("cast-vaults", [])
-            peers = parse_vault_entries(vault_entries)
+            # Parse hsync entries
+            hsync_entries = cast_fields.get("cast-hsync") or cast_fields.get("cast-vaults", [])
+            peers = parse_hsync_entries(hsync_entries)
 
             # Get codebases
             codebases = cast_fields.get("cast-codebases", [])

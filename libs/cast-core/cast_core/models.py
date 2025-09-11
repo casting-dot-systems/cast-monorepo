@@ -13,17 +13,18 @@ class CastConfig(BaseModel):
 
     cast_version: int = Field(default=1, alias="cast-version")
     cast_id: str = Field(description="UUID4 for this Cast/Root", alias="cast-id")
-    cast_name: str = Field(description="Name of this vault", alias="cast-name")
+    cast_name: str = Field(description="Name of this cast", alias="cast-name")
+    # DEPRECATED: location is standardized to "Cast" and omitted from new configs.
     cast_location: str = Field(
-        default="Cast", description="Relative path to vault", alias="cast-location"
+        default="Cast", description="(deprecated) relative path; always 'Cast'", alias="cast-location"
     )
 
 
 class InstalledVault(BaseModel):
-    """A peer vault installed locally."""
+    """(deprecated name) A peer Cast installed locally."""
 
-    name: str = Field(description="Peer name as referenced in cast-vaults")
-    filepath: str = Field(description="Absolute path to peer vault folder")
+    name: str = Field(description="Peer name as referenced in cast-hsync")
+    filepath: str = Field(description="Absolute path to peer Cast folder")
 
 
 class InstalledCodebase(BaseModel):
@@ -68,9 +69,9 @@ class SyncStateEntry(BaseModel):
 
     digest: str = Field(description="SHA256 hex digest")
     ts: str = Field(description="Timestamp YYYY-MM-DD HH:mm")
-    # NEW: optional vault-relative paths captured at baseline time
-    rel: str | None = Field(default=None, description="Local vault-relative path at baseline")
-    peer_rel: str | None = Field(default=None, description="Peer vault-relative path at baseline")
+    # NEW: optional cast-relative paths captured at baseline time
+    rel: str | None = Field(default=None, description="Local cast-relative path at baseline")
+    peer_rel: str | None = Field(default=None, description="Peer cast-relative path at baseline")
 
 
 class SyncState(BaseModel):
@@ -87,6 +88,7 @@ class CastFrontMatter(TypedDict, total=False):
     """Parsed front matter fields (cast-* only)."""
 
     cast_id: str | None
-    cast_vaults: list[str] | None
+    cast_hsync: list[str] | None
+    cast_vaults: list[str] | None  # Legacy field for migration
     cast_codebases: list[str] | None
     cast_version: int | None

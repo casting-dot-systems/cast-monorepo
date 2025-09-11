@@ -57,7 +57,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _get_root_and_vault() -> tuple[Path, Path]:
-    """Locate Cast root (contains .cast/) and vault path from config."""
+    """Locate Cast root (contains .cast/) and standardized Cast folder."""
     cur = Path.cwd()
     root = None
     if (cur / ".cast").exists():
@@ -76,10 +76,9 @@ def _get_root_and_vault() -> tuple[Path, Path]:
         raise typer.Exit(2)
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml_rt.load(f) or {}
-    vault_rel = cfg.get("cast-location", "Cast")
-    vault = root / vault_rel
+    vault = root / "Cast"
     if not vault.exists():
-        console.print(f"[red]Vault not found at {vault}[/red]")
+        console.print(f"[red]Cast folder not found at {vault}[/red]")
         raise typer.Exit(2)
     return root, vault
 
@@ -330,7 +329,7 @@ def gdoc_add(
         None, "--title", "-t", help="Override note title; otherwise use the Doc title"
     ),
     dir: Path = typer.Option(
-        Path("."), "--dir", help="Vault-relative directory to place the note"
+        Path("."), "--dir", help="Cast-relative directory to place the note"
     ),
     overwrite: bool = typer.Option(
         True, "--overwrite/--no-overwrite", help="Overwrite the note if it already exists"
@@ -399,7 +398,7 @@ def gdoc_add(
 @gdoc_app.command("new")
 def gdoc_new(
     title: str = typer.Argument(..., help="Title for the new note & Google Doc"),
-    dir: Path = typer.Option(Path("."), "--dir", help="Vault-relative directory for the note"),
+    dir: Path = typer.Option(Path("."), "--dir", help="Cast-relative directory for the note"),
     folder_id: Optional[str] = typer.Option(None, "--folder-id", help="Drive folderId for the Doc"),
     share_with: List[str] = typer.Option(
         [], "--share-with", help="Email(s) to grant writer access to the Doc"
@@ -454,7 +453,7 @@ def gdoc_new(
     front = {
         "url": url,
         # Ensure Cast fields exist (cast-id, cast-version).
-        # cast-vaults/codebases left to the user or hsync to manage.
+        # cast-hsync/codebases left to the user or hsync to manage.
     }
     front, _ = ensure_cast_fields(front, generate_id=True)
 
@@ -487,7 +486,7 @@ def gdoc_pull(
     ),
     all_: bool = typer.Option(
         False, "--all", "-a", "--a",
-        help="Pull all GDoc notes in the vault (files prefixed with '(GDoc) ')."
+        help="Pull all GDoc notes in the cast (files prefixed with '(GDoc) ')."
     ),
 ):
     """
@@ -501,7 +500,7 @@ def gdoc_pull(
     if all_:
         files = list(_iter_gdoc_notes(vault))
         if not files:
-            console.print("[yellow]No '(GDoc) ' notes found in the vault.[/yellow]")
+            console.print("[yellow]No '(GDoc) ' notes found in the cast.[/yellow]")
             raise typer.Exit(0)
 
         console.print(f"[bold]Pulling {len(files)} GDoc note(s)...[/bold]")

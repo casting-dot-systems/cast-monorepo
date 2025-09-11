@@ -17,8 +17,8 @@ def read_file(p: Path) -> str:
 def _normalize_peers(peers: Iterable[Any]) -> list[str]:
     """
     Accepts:
-      - ["VaultA", "VaultB (watch)"]
-      - [("VaultA","live"), ("VaultB","watch")]
+      - ["CastA", "CastB (watch)"]
+      - [("CastA","live"), ("CastB","watch")]
     Returns a list of strings in "Name (mode)" format.
     """
     out: list[str] = []
@@ -46,7 +46,7 @@ def mk_note(
     lines = [
         "---",
         f"cast-id: {cast_id}",
-        "cast-vaults:",
+        "cast-hsync:",
     ]
     for e in _normalize_peers(peers or []):
         lines.append(f"- {e}")

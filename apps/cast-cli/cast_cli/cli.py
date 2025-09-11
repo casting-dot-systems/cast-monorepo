@@ -21,7 +21,7 @@ from rich.table import Table
 from ruamel.yaml import YAML
 
 # Initialize
-app = typer.Typer(help="Cast Sync - Synchronize Markdown files across local vaults")
+app = typer.Typer(help="Cast Sync - Synchronize Markdown files across local casts")
 # Subcommands (e.g., gdoc) get added at bottom to avoid circular imports.
 console = Console()
 yaml = YAML()
@@ -100,8 +100,7 @@ def install(
         entry = register_cast(root)
         console.print(
             f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n"
-            f"  root: {entry.root}\n"
-            f"  vault: {entry.vault_path}"
+            f"  root: {entry.root}"
         )
     except Exception as e:
         console.print(f"[red]Install failed:[/red] {e}")
@@ -113,18 +112,13 @@ def list_cmd(
     json_out: bool = typer.Option(False, "--json", help="Output as JSON"),
     show_ids: bool = typer.Option(False, "--ids", help="Include cast IDs in table output"),
 ):
-    """List casts installed in the machine registry."""
+    """List casts installed in the machine registry (root paths only)."""
     try:
         entries = list_casts()
         if json_out:
             payload = {
                 "casts": [
-                    {
-                        "cast_id": e.cast_id,
-                        "name": e.name,
-                        "root": str(e.root),
-                        "vault": str(e.vault_path),
-                    }
+                    {"cast_id": e.cast_id, "name": e.name, "root": str(e.root)}
                     for e in entries
                 ]
             }
@@ -139,12 +133,11 @@ def list_cmd(
                 if show_ids:
                     table.add_column("ID")
                 table.add_column("Root")
-                table.add_column("Vault")
                 for e in entries:
                     row = [e.name]
                     if show_ids:
                         row.append(e.cast_id)
-                    row.extend([str(e.root), str(e.vault_path)])
+                    row.extend([str(e.root)])
                     table.add_row(*row)
                 console.print(table)
     except Exception as e:
@@ -155,12 +148,11 @@ def list_cmd(
 @app.command()
 def init(
     name: str | None = typer.Option(None, "--name", help="Name for this Cast"),
-    location: str = typer.Option("Cast", "--location", help="Vault location relative to root"),
     install_after: bool = typer.Option(
         True, "--install/--no-install", help="Also register in machine registry (default: install)"
     ),
 ):
-    """Initialize a new Cast in the current directory."""
+    """Initialize a new Cast in the current directory (always uses ./Cast)."""
     root = Path.cwd()
     cast_dir = root / ".cast"
 
@@ -175,15 +167,14 @@ def init(
     name = _sanitize_name(name)
     # Create directories
     cast_dir.mkdir(parents=True)
-    vault_dir = root / location
-    vault_dir.mkdir(parents=True, exist_ok=True)
+    cast_dir_path = root / "Cast"
+    cast_dir_path.mkdir(parents=True, exist_ok=True)
 
     # Create config
     config = {
         "cast-version": 1,
         "cast-id": str(uuid.uuid4()),
         "cast-name": name,
-        "cast-location": location,
     }
 
     with open(cast_dir / "config.yaml", "w", encoding="utf-8") as f:
@@ -196,14 +187,14 @@ def init(
 
     console.print(f"[green][OK] Cast initialized: {name}[/green]")
     console.print(f"  Root: {root}")
-    console.print(f"  Vault: {vault_dir}")
+    console.print(f"  Cast dir: {cast_dir_path}")
 
     # Optional: auto-install/register to machine registry
     if install_after:
         try:
             entry = register_cast(root)
             console.print(
-                f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n  root: {entry.root}\n  vault: {entry.vault_path}"
+                f"[green][OK][/green] Installed cast: [bold]{entry.name}[/bold]\n  root: {entry.root}"
             )
         except Exception as e:
             console.print(f"[red]Note:[/red] init succeeded, but auto-install failed: {e}")
@@ -261,7 +252,7 @@ def hsync(
         False, "--debug", help="Show a detailed, legible execution plan (includes NO_OP)"
     ),
 ):
-    """Run horizontal sync across local vaults."""
+    """Run horizontal sync across local casts."""
     # Adjust logging level based on debug flag
     if debug:
         logging.getLogger().setLevel(logging.INFO)
@@ -279,13 +270,13 @@ def hsync(
         with open(config_path, encoding="utf-8") as f:
             config_data = yaml.load(f)
 
-        vault_path = root / config_data.get("cast-location", "Cast")
+        vault_path = root / "Cast"
         if not vault_path.exists():
-            console.print(f"[red]Error: Vault not found at {vault_path}[/red]")
+            console.print(f"[red]Error: Cast folder not found at {vault_path}[/red]")
             raise typer.Exit(2)
 
         # Run sync
-        console.print(f"[cyan]Syncing vault: {vault_path}[/cyan]")
+        console.print(f"[cyan]Syncing cast: {vault_path}[/cyan]")
 
         try:
             with cast_lock(root):
@@ -335,7 +326,7 @@ def hsync(
                                 entry = resolve_cast_by_name(p.peer_name)
                             except Exception:
                                 entry = None
-                            base = (p.peer_root / entry.vault_location) if (entry and p.peer_root) else None
+                            base = (p.peer_root / "Cast") if p.peer_root else None
                             _from = str(p.peer_path.relative_to(base)) if (base and p.peer_path) else (p.peer_path.name if p.peer_path else "")
                             _to = str(p.rename_to.relative_to(base)) if (base and p.rename_to) else (p.rename_to.name if p.rename_to else "")
                             details = f"peer: {_from} → {_to}"
@@ -433,10 +424,13 @@ def doctor():
             if not config.get("cast-name"):
                 issues.append("cast-name missing in config.yaml")
 
-            vault_location = config.get("cast-location", "Cast")
-            vault_path = root / vault_location
+            vault_path = root / "Cast"
             if not vault_path.exists():
-                issues.append(f"Vault not found at {vault_location}")
+                issues.append(f"Cast folder not found at ./Cast")
+            elif config.get("cast-location") and config.get("cast-location") != "Cast":
+                warnings.append(
+                    "Deprecated 'cast-location' found in config; Casts now assume './Cast'."
+                )
 
             # Check registry installation state
             try:
@@ -459,8 +453,7 @@ def doctor():
         # Validate that referenced peers are resolvable via the machine registry
         try:
             if config_path.exists() and not issues:
-                vault_location = config.get("cast-location", "Cast")
-                vault_path = root / vault_location
+                vault_path = root / "Cast"
                 if vault_path.exists():
                     idx = build_ephemeral_index(root, vault_path, fixup=False)
                     for peer in sorted(idx.all_peers()):
@@ -507,17 +500,17 @@ def report():
         with open(config_path, encoding="utf-8") as f:
             config = yaml.load(f)
 
-        vault_path = root / config.get("cast-location", "Cast")
+        vault_path = root / "Cast"
 
         if not vault_path.exists():
-            console.print(f"[red]Error: Vault not found at {vault_path}[/red]")
+            console.print(f"[red]Error: Cast folder not found at {vault_path}[/red]")
             raise typer.Exit(2)
 
         index = build_ephemeral_index(root, vault_path, fixup=False)
 
         # Generate report
         report = {
-            "vault": str(vault_path),
+            "cast_dir": str(vault_path),
             "files": len(index.by_id),
             "peers": list(index.all_peers()),
             "codebases": list(index.all_codebases()),

@@ -17,7 +17,7 @@ cast tui
 * **Fuzzy autocompletion** (Prompt Toolkit) for file paths; titles/cast-id shown in the menu.
 * **Preview** YAML (subset) + first 60 lines of body.
 * **Edit** via `$EDITOR` (best effort).
-* **Sync** whole vault or a selected file.
+* **Sync** whole cast or a selected file.
 * **Live reindex** with `Ctrl‑R`.
 * `report` and `peers` helpers.
 
@@ -29,7 +29,7 @@ view <file>     # alias for open
 edit <file>     # open file in $EDITOR
 sync [<file>]   # run HorizontalSync; file limits scope
 report          # show counts of files/peers/codebases
-peers           # list peers referenced in the vault
+peers           # list peers referenced in the cast
 help            # help text
 quit | exit     # leave TUI
 ```

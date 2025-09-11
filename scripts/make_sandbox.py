@@ -45,7 +45,7 @@ def build():
     CAST_HOME.mkdir(parents=True, exist_ok=True)
     env = {"CAST_HOME": str(CAST_HOME)}
 
-    # 3 vaults
+    # 3 casts
     vA = SANDBOX / "vaultA"
     vB = SANDBOX / "vaultB"
     vC = SANDBOX / "vaultC"
@@ -60,7 +60,7 @@ def build():
         [
             "---",
             "cast-id: 11111111-1111-1111-1111-111111111111",
-            "cast-vaults:",
+            "cast-hsync:",
             "- vaultA (live)",
             "- vaultB (live)",
             "- vaultC (live)",

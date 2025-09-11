@@ -17,7 +17,7 @@ yaml.default_flow_style = False
 yaml.width = 4096  # Avoid line wrapping
 
 
-CAST_FIELDS_ORDER = ["cast-id", "cast-vaults", "cast-codebases", "cast-version"]
+CAST_FIELDS_ORDER = ["cast-id", "cast-hsync", "cast-codebases", "cast-version"]
 VAULT_ENTRY_REGEX = re.compile(r"^\s*(?P<name>[^()]+?)\s*\((?P<mode>live|watch)\)\s*$")
 FM_RE = _re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", _re.DOTALL)
 
@@ -57,10 +57,10 @@ def extract_cast_fields(front_matter: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in front_matter.items() if k.startswith("cast-")}
 
 
-def parse_vault_entries(entries: list[str] | None) -> dict[str, str]:
+def parse_hsync_entries(entries: list[str] | None) -> dict[str, str]:
     """
-    Parse cast-vaults entries into {name: mode} dict.
-    Invalid entries are ignored.
+    Parse cast-hsync entries into {name: mode} dict.
+    Invalid entries are ignored. Values remain 'live' or 'watch'.
     """
     if not entries:
         return {}
@@ -74,6 +74,11 @@ def parse_vault_entries(entries: list[str] | None) -> dict[str, str]:
             result[match.group("name")] = match.group("mode")
 
     return result
+
+
+#
+# Legacy alias for any internal callers not yet updated (harmless if removed later).
+parse_vault_entries = parse_hsync_entries
 
 
 def ensure_cast_fields(
@@ -100,7 +105,7 @@ def ensure_cast_fields(
         front_matter["cast-version"] = 1
         modified = True
 
-    # NOTE: Do not mutate 'cast-vaults' here. Invalid entries are handled at routing time.
+    # NOTE: Do not mutate 'cast-hsync' here. Invalid entries are handled at routing time.
 
     return front_matter, modified
 
@@ -141,6 +146,10 @@ def write_cast_file(
     filepath: Path, front_matter: dict[str, Any], body: str, reorder: bool = True
 ) -> None:
     """Write a Markdown file with YAML front matter."""
+    # Migrate legacy field name inline if still present
+    if "cast-vaults" in front_matter and "cast-hsync" not in front_matter:
+        front_matter["cast-hsync"] = front_matter.pop("cast-vaults")
+        
     if reorder:
         front_matter = reorder_cast_fields(front_matter)
 

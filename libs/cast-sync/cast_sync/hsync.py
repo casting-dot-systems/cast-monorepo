@@ -1,4 +1,4 @@
-"""Horizontal sync engine with 3-way merge logic."""
+"""Horizontal sync engine with 3-way merge logic (standardized to Root/Cast)."""
 
 import json
 import logging
@@ -50,6 +50,7 @@ class SyncPlan:
     baseline_digest: str | None
     # Optional rename destination
     rename_to: Path | None = None
+    peer_mode: str | None = None  # 'live' | 'watch' (as seen from the decision context)
 
 
 @dataclass
@@ -58,8 +59,8 @@ class SummaryItem:
     action: str                  # e.g. 'pull', 'push', 'create_peer', 'delete_local', 'rename_peer', 'conflict', ...
     cast_id: str
     peer: str
-    local_rel: str               # path relative to local vault (best-effort for deletions)
-    peer_rel: str | None = None  # path relative to peer vault (if known)
+    local_rel: str               # path relative to local cast (best-effort for deletions)
+    peer_rel: str | None = None  # path relative to peer cast (if known)
     detail: str | None = None    # human text like "peer → local", or "Projects/TODO.md → Notes/TODO.md"
 
 
@@ -85,8 +86,8 @@ class HorizontalSync:
         self.config = self._load_config()
         self.syncstate = self._load_syncstate()
 
-        # Vault path
-        self.vault_path = root_path / self.config.cast_location
+        # Standardized Cast content directory
+        self.vault_path = root_path / "Cast"
         self._registry = load_registry()
         # Exposed artifacts for the CLI
         self.summary: SyncSummary | None = None
@@ -234,7 +235,7 @@ class HorizontalSync:
 
     def _normalize_rel_for_lookup(self, path_or_id: str) -> str:
         """
-        Convert a user-provided --file value into a vault-relative path
+        Convert a user-provided --file value into a cast-relative path
         suitable for EphemeralIndex.get_by_path(), if it looks like a path.
         Otherwise return the string unchanged (cast-id case).
         """
@@ -249,20 +250,19 @@ class HorizontalSync:
         return str(p)
 
     def _local_rel(self, p: Path) -> str:
-        """Get vault-relative path for a local file."""
+        """Get cast-relative path for a local file."""
         try:
             return str(p.relative_to(self.vault_path))
         except Exception:
             return p.name
 
     def _peer_rel_str(self, peer_name: str, peer_root: Path | None, p: Path | None) -> str | None:
-        """Get vault-relative path for a peer file."""
+        """Get cast-relative path for a peer file."""
         if p is None or peer_root is None:
             return None
+        base = peer_root / "Cast"
         try:
-            entry = resolve_cast_by_name(peer_name)
-            base = (peer_root / entry.vault_location) if (entry and peer_root) else None
-            return str(p.relative_to(base)) if base else p.name
+            return str(p.relative_to(base))
         except Exception:
             return p.name
 
@@ -337,7 +337,7 @@ class HorizontalSync:
         self._save_peer_syncstate(peer_root, their_state)
 
     def _resolve_peer_vault_path(self, peer_name: str) -> Path | None:
-        """Resolve a peer vault folder path by name.
+        """Resolve a peer cast folder path by name.
 
         Resolution:
           • machine registry (resolve_cast_by_name),
@@ -345,7 +345,7 @@ class HorizontalSync:
         """
         entry = resolve_cast_by_name(peer_name)
         if entry:
-            return entry.root / entry.vault_location
+            return entry.root / "Cast"
         return None
 
     def _index_peer(
@@ -356,7 +356,7 @@ class HorizontalSync:
         existing_index: EphemeralIndex | None = None,
     ) -> tuple[Path, EphemeralIndex] | None:
         """
-        Resolve and index a peer vault. If `existing_index` is provided, merge
+        Resolve and index a peer cast. If `existing_index` is provided, merge
         newly discovered records into it (used for incremental, per-file indexing).
         """
         peer_vault_path = self._resolve_peer_vault_path(peer_name)
@@ -524,7 +524,7 @@ class HorizontalSync:
             conflicts_resolved=0,
         )
         # Build local index
-        logger.info(f"Indexing local vault: {self.vault_path}")
+        logger.info(f"Indexing local cast: {self.vault_path}")
         local_index = build_ephemeral_index(
             self.root_path, self.vault_path, fixup=True, limit_file=file_filter
         )
@@ -601,6 +601,7 @@ class HorizontalSync:
                 elif decision == SyncDecision.RENAME_LOCAL:
                     if peer_rec:
                         rename_to = self.vault_path / peer_rec["relpath"]
+                peer_mode = mode
 
                 plan = SyncPlan(
                     cast_id=local_rec["cast_id"],
@@ -613,6 +614,7 @@ class HorizontalSync:
                     peer_digest=peer_digest,
                     baseline_digest=baseline_digest,
                     rename_to=rename_to,
+                    peer_mode=peer_mode,
                 )
                 plans.append(plan)
 
@@ -664,11 +666,18 @@ class HorizontalSync:
                 # Make sure the peer is indexed (full scan: we need to find cast-id anywhere)
                 pair = peer_indices.get(peer_name)
                 if pair is None:
-                    pair = self._index_peer(peer_name)  # full index to locate cast_id
+                    # No cache yet → build a FULL index so we can locate the cast-id anywhere.
+                    pair = self._index_peer(peer_name)
                     if pair is None:
                         continue
-                    peer_indices[peer_name] = pair
-                peer_vault_path, peer_index = peer_indices[peer_name]
+                else:
+                    # We may have a LIMITED index from the main planning pass.
+                    # Upgrade it to FULL by merging a full scan into the existing index.
+                    # (Calling _index_peer without limit_file triggers a full scan.)
+                    upgraded = self._index_peer(peer_name, existing_index=pair[1])
+                    pair = upgraded or pair
+                peer_indices[peer_name] = pair
+                peer_vault_path, peer_index = pair
                 peer_rec = peer_index.get_by_id(cast_id)
                 baseline_digest = self.syncstate.baselines[cast_id][peer_name].digest
 
@@ -722,6 +731,7 @@ class HorizontalSync:
                     peer_digest=peer_digest,
                     baseline_digest=baseline_digest,
                     rename_to=None,
+                    peer_mode=peer_mode,
                 )
                 plans.append(plan)
 
@@ -757,8 +767,7 @@ class HorizontalSync:
                 peer_rel = None
                 if plan.peer_path:
                     try:
-                        entry = resolve_cast_by_name(plan.peer_name)
-                        base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                        base = (plan.peer_root / "Cast") if plan.peer_root else None
                         peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
                     except Exception:
                         peer_rel = plan.peer_path.name
@@ -773,8 +782,7 @@ class HorizontalSync:
                     detail = "deleted on peer (propagate local deletion)"
                 elif plan.decision == SyncDecision.RENAME_PEER and plan.rename_to and plan.peer_path:
                     try:
-                        entry = resolve_cast_by_name(plan.peer_name)
-                        base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                        base = (plan.peer_root / "Cast") if plan.peer_root else None
                         _from = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
                         _to = str(plan.rename_to.relative_to(base)) if base else plan.rename_to.name
                         detail = f"peer: {_from} → {_to}"
@@ -810,6 +818,20 @@ class HorizontalSync:
 
         for plan in plans:
             if plan.decision == SyncDecision.NO_OP:
+                # Special NO_OP: peer missing + baseline exists + WATCH → clear baselines quietly.
+                # This covers the case where a WATCH peer deleted its copy; we keep local and
+                # drop the relationship so future syncs don't churn.
+                if (
+                    plan.peer_digest is None
+                    and plan.baseline_digest is not None
+                    and (plan.peer_mode or "") == "watch"
+                ):
+                    try:
+                        self._clear_baseline_both(plan.cast_id, plan.peer_name, plan.peer_root)
+                        self._log_event("baseline_cleared_watch_skip", cast_id=plan.cast_id, peer=plan.peer_name)
+                    except Exception:
+                        pass
+                    continue
                 # If identical content, ensure baseline is correct.
                 # Covers both "first contact identical" and "both sides converged to same digest".
                 if plan.peer_digest is not None and plan.local_digest == plan.peer_digest:
@@ -846,7 +868,7 @@ class HorizontalSync:
                             except Exception:
                                 _from, _to = before.name, after.name
                             self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
-                            # Cascade rename in LOCAL vault
+                            # Cascade rename in LOCAL cast
                             try:
                                 self._rename_cascade(self.vault_path, _from, _to, f"local adopt({plan.peer_name})")
                             except Exception:
@@ -870,8 +892,7 @@ class HorizontalSync:
                     peer_rel = None
                     if plan.peer_path:
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            base = (plan.peer_root / "Cast") if plan.peer_root else None
                             peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
                         except Exception:
                             peer_rel = plan.peer_path.name
@@ -887,10 +908,9 @@ class HorizontalSync:
                         local_rel_now = self._local_rel(plan.local_path)
                         peer_rel_now = self._peer_rel_str(plan.peer_name, plan.peer_root, plan.peer_path)
                         if peer_rel_now and local_rel_now != peer_rel_now:
-                            # Compute peer vault base
+                            # Compute peer cast base
                             try:
-                                entry = resolve_cast_by_name(plan.peer_name)
-                                peer_vault_base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                peer_vault_base = (plan.peer_root / "Cast") if plan.peer_root else None
                             except Exception:
                                 peer_vault_base = None
                             if peer_vault_base:
@@ -902,8 +922,7 @@ class HorizontalSync:
                             after = self._safe_move(plan.peer_path, desired, provenance="LOCAL")
                             plan.peer_path = after
                             try:
-                                entry = resolve_cast_by_name(plan.peer_name)
-                                base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                base = (plan.peer_root / "Cast") if plan.peer_root else None
                                 _from = str(before.relative_to(base)) if base else before.name
                                 _to = str(after.relative_to(base)) if base else after.name
                             except Exception:
@@ -932,8 +951,7 @@ class HorizontalSync:
                     peer_rel = None
                     if plan.peer_path:
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            base = (plan.peer_root / "Cast") if plan.peer_root else None
                             peer_rel = str(plan.peer_path.relative_to(base)) if base else plan.peer_path.name
                         except Exception:
                             peer_rel = plan.peer_path.name
@@ -972,12 +990,7 @@ class HorizontalSync:
                     path_str = ""
                     if plan.peer_path:
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (
-                                (plan.peer_root / entry.vault_location)
-                                if (entry and plan.peer_root)
-                                else None
-                            )
+                            base = (plan.peer_root / "Cast") if plan.peer_root else None
                             path_str = (
                                 str(plan.peer_path.relative_to(base))
                                 if base
@@ -1004,12 +1017,7 @@ class HorizontalSync:
                         after = self._safe_move(plan.peer_path, plan.rename_to, provenance="LOCAL")
                         # Compute paths relative to the peer's vault, defensively.
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (
-                                (plan.peer_root / entry.vault_location)
-                                if (entry and plan.peer_root)
-                                else None
-                            )
+                            base = (plan.peer_root / "Cast") if plan.peer_root else None
                             _from = str(before.relative_to(base)) if base else before.name
                             _to = str(after.relative_to(base)) if base else after.name
                         except Exception:
@@ -1021,8 +1029,7 @@ class HorizontalSync:
                         )
                         # Cascade rename in PEER vault
                         try:
-                            entry = resolve_cast_by_name(plan.peer_name)
-                            base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                            base = (plan.peer_root / "Cast") if plan.peer_root else None
                             if base: self._rename_cascade(base, _from, _to, f"peer {plan.peer_name} (rename_peer)")
                         except Exception: pass
                         self._update_baseline_both(
@@ -1098,8 +1105,7 @@ class HorizontalSync:
                             if peer_rel_now and local_rel_now != peer_rel_now:
                                 # compute desired path in peer vault
                                 try:
-                                    entry = resolve_cast_by_name(plan.peer_name)
-                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                    base = (plan.peer_root / "Cast") if plan.peer_root else None
                                 except Exception:
                                     base = None
                                 desired = (base / local_rel_now) if base else plan.peer_path.parent / Path(local_rel_now).name
@@ -1107,17 +1113,15 @@ class HorizontalSync:
                                 after = self._safe_move(plan.peer_path, desired, provenance="LOCAL")
                                 plan.peer_path = after
                                 try:
-                                    entry = resolve_cast_by_name(plan.peer_name)
-                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                    base = (plan.peer_root / "Cast") if plan.peer_root else None
                                     _from = str(before.relative_to(base)) if base else before.name
                                     _to = str(after.relative_to(base)) if base else after.name
                                 except Exception:
                                     _from, _to = before.name, after.name
                                 self._log_event("rename_peer", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
-                                # Cascade rename in PEER vault
+                                # Cascade rename in PEER cast
                                 try:
-                                    entry = resolve_cast_by_name(plan.peer_name)
-                                    base = (plan.peer_root / entry.vault_location) if (entry and plan.peer_root) else None
+                                    base = (plan.peer_root / "Cast") if plan.peer_root else None
                                     if base: self._rename_cascade(base, _from, _to, f"peer {plan.peer_name} (conflict KEEP_LOCAL)")
                                 except Exception: pass
                                 self.summary.counts["rename_peer"] = self.summary.counts.get("rename_peer", 0) + 1
@@ -1164,7 +1168,7 @@ class HorizontalSync:
                                 except Exception:
                                     _from, _to = before.name, after.name
                                 self._log_event("rename_local", cast_id=plan.cast_id, **{"from": _from, "to": _to, "peer": plan.peer_name})
-                                # Cascade rename in LOCAL vault
+                                # Cascade rename in LOCAL cast
                                 try:
                                     self._rename_cascade(self.vault_path, _from, _to, "local (conflict KEEP_PEER)")
                                 except Exception: pass

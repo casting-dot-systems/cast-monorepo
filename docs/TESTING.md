@@ -1,9 +1,9 @@
 # Cast Testing Framework
 
-This repo ships with a comprehensive, sandboxed **E2E testing framework** that drives the `cast` CLI across multiple local vaults with a fully isolated machine registry (`CAST_HOME`). It's designed to be:
+This repo ships with a comprehensive, sandboxed **E2E testing framework** that drives the `cast` CLI across multiple local casts with a fully isolated machine registry (`CAST_HOME`). It's designed to be:
 
 - **Deterministic & isolated** (no pollution of your real `~/.cast`)
-- **Behavioral** (asserts the *intended effect* in files across vaults)
+- **Behavioral** (asserts the *intended effect* in files across casts)
 - **Extensible** (simple helpers + a small scenario DSL)
 
 ## Quick start
@@ -17,16 +17,16 @@ poe all        # format, lint, type-check, and test
 Manual sandbox for demos:
 
 ```bash
-poe sandbox        # builds ./sandbox, creates 3 vaults, runs hsync, prints a report
-poe sandbox:clean  # removes ./sandbox and uninstalls any registered vaults within it
+poe sandbox        # builds ./sandbox, creates 3 casts, runs hsync, prints a report
+poe sandbox:clean  # removes ./sandbox and uninstalls any registered casts within it
 ```
 
 ## Design
 
 - **Sandboxed registry**: All framework tests set `CAST_HOME` to a temp directory. No global state is touched.
-- **Three-vault topology**: Helpers create 3 roots (A/B/C) to cover push/pull/cascade/watch/conflicts.
+- **Three-cast topology**: Helpers create 3 roots (A/B/C) to cover push/pull/cascade/watch/conflicts.
 - **Real CLI**: Tests call the actual Typer `app` with `CliRunner` (like a terminal), optionally with `input` to drive interactive conflicts.
-- **First-class cleanup**: Every test uninstalls registered vaults and removes files, even on failure.
+- **First-class cleanup**: Every test uninstalls registered casts and removes files, even on failure.
 
 ## Writing tests
 
@@ -38,9 +38,9 @@ from tests.framework.files import mk_note, write_file, read_file
 
 def test_my_feature(tmp_path):
     with Sandbox(tmp_path) as sb:
-        A = sb.create_vault("Alpha")
-        B = sb.create_vault("Beta")
-        C = sb.create_vault("Gamma")
+        A = sb.create_cast("Alpha")
+        B = sb.create_cast("Beta")
+        C = sb.create_cast("Gamma")
 
         # Arrange: create a note in A with peers B,C
         rel = A.vault_rel("note.md")
@@ -69,7 +69,7 @@ from tests.framework.files import mk_note
 
 def test_scenario(tmp_path):
     with Sandbox(tmp_path) as sb:
-        A, B, C = sb.create_vault("A"), sb.create_vault("B"), sb.create_vault("C")
+        A, B, C = sb.create_cast("A"), sb.create_cast("B"), sb.create_cast("C")
         rel = A.vault_rel("story.md")
         Scenario(sb)\
             .write(A, rel, mk_note("1111-...","Story","Hi", peers=["A","B","C"]))\
@@ -81,7 +81,7 @@ def test_scenario(tmp_path):
 
 ## Patterns you'll often need
 
-1. **Watch mode**: Include `"VaultX (watch)"` in `cast-vaults`. Pushes to watch peers are NO‑OPs.
+1. **Watch mode**: Include `"CastX (watch)"` in `cast-hsync`. Pushes to watch peers are NO‑OPs.
    - **Deletions & WATCH** (now enforced):
      - If a WATCH peer deletes its copy, local is **not** deleted; baselines are cleared for that pair.
      - If local deletes the file, WATCH peers are **not** deleted; baselines are cleared for that pair.
@@ -89,7 +89,7 @@ def test_scenario(tmp_path):
 2. **Interactive conflicts**: Call `sb.hsync(vault, non_interactive=False, input="2\n")` to "Keep PEER".
 3. **Limit-file**: `sb.hsync(vault, file=str(relpath))` ensures no deletion pass side effects on other files.
 4. **Cascade**: By default `hsync` cascades; assertions can be placed on peers' peers.
-5. **Safe pushes**: When peer has a different `cast-id` at the *same path*, sync creates `(~from {vault})` file instead of overwriting.
+5. **Safe pushes**: When peer has a different `cast-id` at the *same path*, sync creates `(~from {cast})` file instead of overwriting.
 
 ## Extending to future features
 

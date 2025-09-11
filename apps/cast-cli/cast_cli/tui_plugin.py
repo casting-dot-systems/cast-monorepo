@@ -50,10 +50,9 @@ def _read_config(root: Path) -> tuple[str, Path]:
     with open(cfg, encoding="utf-8") as f:
         data = _yaml.load(f) or {}
     cast_name = data.get("cast-name", "")
-    vault_rel = data.get("cast-location", "Cast")
-    vault = root / vault_rel
+    vault = root / "Cast"
     if not vault.exists():
-        raise RuntimeError(f"Vault not found at {vault}")
+        raise RuntimeError(f"Cast folder not found at {vault}")
     return cast_name, vault
 
 
@@ -65,7 +64,7 @@ class FileItem:
 
 
 class CastContext:
-    """In-memory view of the Cast vault and ephemeral index."""
+    """In-memory view of the Cast folder and ephemeral index."""
     def __init__(self, root: Path, vault: Path, cast_name: str):
         self.root = root
         self.vault = vault
@@ -297,7 +296,7 @@ class CastTUIPlugin(Plugin):
         ))
         ctx.app.register_command(Command(
             name="peers",
-            description="List peers referenced in vault",
+            description="List peers referenced in cast",
             handler=lambda c, a: self._cmd_peers(c, a),
         ))
 
@@ -327,7 +326,7 @@ class CastTUIPlugin(Plugin):
             return
         item = self._cast.resolve(args[0]) if self._cast else None
         if not item:
-            ctx.console.print(f"[red]No match[/red] for '{args[0]}'. Try Tab completion or paste a vault-relative path.")
+            ctx.console.print(f"[red]No match[/red] for '{args[0]}'. Try Tab completion or paste a cast-relative path.")
             return
         _preview_file(ctx.console, self._cast.vault, item)
 

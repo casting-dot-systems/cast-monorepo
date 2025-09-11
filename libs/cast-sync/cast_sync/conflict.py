@@ -43,7 +43,7 @@ def handle_conflict(
         local_path: Path to local file
         peer_path: Path to peer file (if it exists)
         cast_id: Cast ID of the file
-        peer_name: Name of the peer vault
+        peer_name: Name of the peer cast
         cast_root: Root of the Cast (contains .cast/)
         interactive: Whether to prompt user
         local_content: Optional local content to use instead of reading file
@@ -91,14 +91,13 @@ def handle_conflict(
     except Exception:
         local_preview, peer_preview = "", ""
 
-    # Resolve vault-relative paths for clearer UI (names/paths)
+    # Resolve cast-relative paths for clearer UI (names/paths)
     def _local_cast_info(root: Path) -> tuple[str, Path]:
         try:
             cfg = root / ".cast" / "config.yaml"
             data = _yaml.load(cfg.read_text(encoding="utf-8")) or {}
             cast_name = data.get("cast-name", "LOCAL")
-            vault_loc = data.get("cast-location", "Cast")
-            return cast_name, (root / vault_loc)
+            return cast_name, (root / "Cast")
         except Exception:
             return "LOCAL", (root / "Cast")
 
@@ -325,8 +324,7 @@ def handle_conflict(
         peer_title = None
         if peer_path:
             try:
-                entry = resolve_cast_by_name(peer_name)
-                base = (entry.root / entry.vault_location) if entry else None
+                base = (cast_root.parent / "Cast") if cast_root else None  # best-effort
                 peer_rel = _rel_or_name(base, peer_path)
             except Exception:
                 peer_rel = peer_path.name
@@ -397,12 +395,13 @@ def handle_conflict(
     console.print(f"\nOptions:\n  1. {opt_local}\n  2. {opt_peer}\n  3. Skip (resolve later)")
 
     while True:
-        choice = input("\nYour choice [1/2/3]: ").strip()
-        if choice == "1":
+        raw = input("\nYour choice [1/2/3 | keep_local | keep_peer | skip]: ").strip()
+        choice = raw.lower()
+        if choice in ("1", "l", "local", "keep_local", "keep local", "keep-local", "keep"):
             return ConflictResolution.KEEP_LOCAL
-        elif choice == "2":
+        elif choice in ("2", "p", "peer", "keep_peer", "keep peer", "keep-peer"):
             return ConflictResolution.KEEP_PEER
-        elif choice == "3":
+        elif choice in ("3", "s", "skip", "later"):
             return ConflictResolution.SKIP
         else:
-            console.print("[red]Invalid choice. Please enter 1, 2, or 3.[/red]")
+            console.print("[red]Invalid choice. Please enter 1, 2, 3, or a named option.[/red]")

@@ -1,7 +1,7 @@
 """Machine-level Cast registry.
 
-Stores installed Cast roots in a per-user registry file so that vaults
-can discover peers by name across the machine (no per-vault wiring).
+Stores installed Cast roots in a per-user registry file so that casts
+can discover peers by name across the machine (no per-cast wiring).
 """
 
 from __future__ import annotations
@@ -69,15 +69,14 @@ class CastEntry:
     cast_id: str
     name: str
     root: Path
-    vault_location: str
-
+    # Standardized: content folder is always root / "Cast"
     @property
-    def vault_path(self) -> Path:
-        return self.root / self.vault_location
+    def cast_path(self) -> Path:
+        return self.root / "Cast"
 
 
-def _read_cast_config(root: Path) -> tuple[str, str, str]:
-    """Return (cast_id, cast_name, cast_location) from .cast/config.yaml in root."""
+def _read_cast_config(root: Path) -> tuple[str, str]:
+    """Return (cast_id, cast_name) from .cast/config.yaml in root."""
     cfg = root / ".cast" / "config.yaml"
     if not cfg.exists():
         raise FileNotFoundError(f"config.yaml not found at: {cfg}")
@@ -85,10 +84,9 @@ def _read_cast_config(root: Path) -> tuple[str, str, str]:
         data = yaml.load(f) or {}
     cast_id = data.get("cast-id")
     cast_name = data.get("cast-name")
-    cast_location = data.get("cast-location", "Cast")
     if not cast_id or not cast_name:
         raise ValueError("config.yaml missing required fields: cast-id/cast-name")
-    return cast_id, cast_name, cast_location
+    return cast_id, cast_name
 
 
 def register_cast(root: Path) -> CastEntry:
@@ -101,7 +99,7 @@ def register_cast(root: Path) -> CastEntry:
       • Exactly one entry per root path (new): any other entry that uses the same root is removed.
     """
     root = root.expanduser().resolve()
-    cast_id, name, vault_location = _read_cast_config(root)
+    cast_id, name = _read_cast_config(root)
 
     reg = load_registry()
     reg.setdefault("casts", {})
@@ -123,21 +121,17 @@ def register_cast(root: Path) -> CastEntry:
             reg["casts"].pop(cid, None)
 
     # Upsert our entry by id (canonical)
-    reg["casts"][cast_id] = {
-        "name": name,
-        "root": str(root),
-        "vault_location": vault_location,
-    }
+    reg["casts"][cast_id] = {"name": name, "root": str(root)}
     save_registry(reg)
-    return CastEntry(cast_id=cast_id, name=name, root=root, vault_location=vault_location)
+    return CastEntry(cast_id=cast_id, name=name, root=root)
 
 
 def _entry_from_reg(cast_id: str, payload: dict[str, Any]) -> CastEntry:
+    # Ignore legacy 'vault_location' if present; standardized to "Cast"
     return CastEntry(
         cast_id=cast_id,
         name=payload.get("name", ""),
         root=Path(payload.get("root", "")),
-        vault_location=payload.get("vault_location", "Cast"),
     )
 
 

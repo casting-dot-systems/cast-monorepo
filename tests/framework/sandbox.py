@@ -28,15 +28,15 @@ def cwd(path: Path):
 
 @dataclass
 class VaultRef:
-    """Reference to a created vault in the sandbox."""
+    """(deprecated name) Reference to a created cast in the sandbox."""
 
     name: str
-    root: Path  # root that contains ".cast" and vault folder
-    vault_location: str  # e.g. "Cast"
+    root: Path  # root that contains ".cast" and Cast folder
+    vault_location: str = "Cast"  # deprecated: standardized to "Cast"
 
     @property
     def vault(self) -> Path:
-        return self.root / self.vault_location
+        return self.root / "Cast"
 
     def vault_rel(self, rel: str | Path) -> Path:
         relp = Path(rel)
@@ -47,10 +47,10 @@ class VaultRef:
 
 class Sandbox:
     """
-    Provides an isolated CAST_HOME, helpers to create vaults, run CLI, and clean up.
+    Provides an isolated CAST_HOME, helpers to create casts, run CLI, and clean up.
     Usage:
         with Sandbox(tmp_path) as sb:
-            A = sb.create_vault("Alpha")
+            A = sb.create_cast("Alpha")
             sb.hsync(A)
     """
 
@@ -87,19 +87,22 @@ class Sandbox:
         res = self.run(["list", "--json"])
         return json.loads(res.stdout).get("casts", [])
 
-    # --- Vault lifecycle ----------------------------------------------------
-    def create_vault(self, name: str, location: str = "Cast") -> VaultRef:
+    # --- Cast lifecycle ----------------------------------------------------
+    def create_cast(self, name: str) -> VaultRef:
+        """Create a new cast with standardized Cast directory."""
         root = self.base / name
         root.mkdir(parents=True, exist_ok=True)
         with cwd(root):
-            assert self.run(["init", "--name", name, "--location", location]).exit_code in (0, 3)
+            assert self.run(["init", "--name", name]).exit_code in (0, 3)
             assert self.run(["install", "."]).exit_code in (0, 3)
-        # sanity: read back config to capture location
-        cfg = _yaml.load((root / ".cast" / "config.yaml").read_text(encoding="utf-8")) or {}
-        location = cfg.get("cast-location", location)
-        vref = VaultRef(name=name, root=root, vault_location=location)
+        vref = VaultRef(name=name, root=root, vault_location="Cast")
         self._vaults.append(vref)
         return vref
+
+    def create_vault(self, name: str, location: str = "Cast") -> VaultRef:
+        """(deprecated) Create a cast. Use create_cast() instead."""
+        # For backward compatibility, but always standardize to Cast
+        return self.create_cast(name)
 
     def uninstall_all(self):
         # Use the CLI's list --json to find all registered casts (by id)

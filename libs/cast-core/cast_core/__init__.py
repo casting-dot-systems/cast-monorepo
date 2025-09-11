@@ -50,4 +50,4 @@ __all__ = [
     "write_cast_file",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
