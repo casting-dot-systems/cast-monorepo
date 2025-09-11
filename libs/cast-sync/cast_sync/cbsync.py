@@ -109,9 +109,9 @@ class CodebaseSync:
         fixed = 0
         for p in remote_vault.rglob("*.md"):
             try:
-                fm, body, has = parse_cast_file(p)
-                if not has:
-                    # Create minimal YAML + membership
+                fm, body, has_cast_fields = parse_cast_file(p)
+                if fm is None:
+                    # No YAML front-matter at all - create from scratch
                     fm = {}
                     fm, _ = ensure_cast_fields(fm, generate_id=True)
                     fm, _ = ensure_codebase_membership(
@@ -120,12 +120,15 @@ class CodebaseSync:
                     write_cast_file(p, fm, body, reorder=True)
                     fixed += 1
                     continue
-                # Has YAML — ensure membership is present/canonical
+                # Has YAML front-matter (cast or non-cast) — preserve existing and ensure cast fields
                 if isinstance(fm, dict):
-                    fm2, changed = ensure_codebase_membership(
-                        fm, codebase=codebase_name, origin_cast=self.config.cast_name
+                    # First ensure cast-id and cast-version are present
+                    fm_with_fields, fields_changed = ensure_cast_fields(fm, generate_id=True)
+                    # Then ensure codebase membership
+                    fm2, membership_changed = ensure_codebase_membership(
+                        fm_with_fields, codebase=codebase_name, origin_cast=self.config.cast_name
                     )
-                    if changed:
+                    if fields_changed or membership_changed:
                         write_cast_file(p, fm2, body, reorder=True)
                         fixed += 1
             except Exception:
